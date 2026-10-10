@@ -15,7 +15,7 @@ ASF 原生只有 `pause& <秒>`(到点自动恢复)和 `play`(手动模式,会�
 **3.** 重启 ASF,日志出现这两行就成功了
 
 ```
-InitPlugins() 正在加载 TimedPlayPlugin V1.1.0.0……
+InitPlugins() 正在加载 TimedPlayPlugin V1.1.1.0……
 InitPlugins() TimedPlayPlugin 加载成功！
 ```
 
@@ -54,6 +54,47 @@ Steam 聊天需加 `!` 前缀;IPC 模式不需要。
 !playfor status                        查剩余时间
 !playfor cancel                        撤销计时,游戏不停
 ```
+
+---
+
+## 给插件开发者的坑:ASF 会裁剪 BCL
+
+如果你以后要改这个插件,**这条务必先读**。
+
+ASF 的单文件发行版是**裁剪(trimmed)**构建的,而且只保留 ASF 自己(以及官方插件)真正调用过的 BCL 成员 —— 它有个 `TrimmerRoots.xml` 白名单,里面逐个方法地列出必须保留的东西,注释直接写着 "Required for SteamTokenDumper plugin" 之类:
+
+```xml
+<assembly fullname="System.Linq">
+    <type fullname="System.Linq.Enumerable">
+        <method name="MaxBy" />
+    </type>
+</assembly>
+```
+
+**你插件里用到的、ASF 自己没用到的 BCL 重载,会被直接删掉**,而且只在代码真正执行到那一行时才炸,表现为一个莫名其妙的:
+
+```
+System.MissingMethodException: Attempted to access a missing method.
+   at YourPlugin.YourClass.SomeMethod(...)
+```
+
+本插件踩过的坑,以及改成的写法:
+
+| ❌ 会被裁掉 | ✅ 换成 ASF 自己在用的 |
+|---|---|
+| `double.TryParse(s, NumberStyles, CultureInfo, out double)` —— ASF 从不用 double 解析 | `float.TryParse(s, NumberStyles, CultureInfo, out float)` |
+| `uint.TryParse(s, NumberStyles, CultureInfo, out uint)` —— ASF 只用 2 参数版 | `uint.TryParse(s, out v)` |
+| `string.Join('+', xs)` char 分隔符 | `string.Join("+", xs)` |
+| `Interlocked.Exchange<T>()` | 普通赋值(`Timer.Dispose()` 本身是幂等的) |
+| `ReferenceEquals(a, b)` | 用现有的 `IsActive` 状态判断 |
+
+**规律很简单:照着 ASF 源码里已经出现过的东西写。** 提交前可以扫一遍:
+
+```powershell
+Select-String -Path <ASF 源码>\**\*.cs -Pattern '你要用的方法名'
+```
+
+这个 bug 在开发机上(未裁剪)完全复现不出来,只在用户装上之后才炸 —— 本插件的 v1.1.0 就是这么翻车的。
 
 ---
 

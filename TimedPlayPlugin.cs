@@ -31,6 +31,12 @@ namespace TimedPlay;
 ///             re-asserted from <see cref="OnBotLoggedOn" /> as soon as the bot comes back.
 ///         </item>
 ///     </list>
+///     One more trap, and the reason this file looks the way it does: ASF ships a trimmed, single-file build and
+///     only preserves the BCL members it (or its own plugins) actually calls - see ASF's <c>TrimmerRoots.xml</c>,
+///     which whitelists individual methods like <c>Enumerable.MaxBy</c> purely so third-party plugins keep working.
+///     Any other BCL overload your plugin happens to use is simply gone, and it fails at runtime with a bare
+///     <see cref="MissingMethodException" /> the first time that code path runs. Every BCL call below therefore
+///     deliberately mirrors a call that already exists in ASF's own source.
 /// </remarks>
 [Export(typeof(IPlugin))]
 internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnection {
@@ -42,7 +48,7 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 	private const int MaxGamesPlayedConcurrently = 32;
 
 	/// <summary>Timer due times are an unsigned int of milliseconds, which caps out at roughly 49.7 days.</summary>
-	private const double MaxMinutes = 43000;
+	private const float MaxMinutes = 43000f;
 
 	/// <summary>
 	///     How often the games are re-asserted. Steam occasionally drops a playing session on its own, and ASF
@@ -58,7 +64,7 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 	public string Name => nameof(TimedPlayPlugin);
 
 	[JsonInclude]
-	public Version Version => typeof(TimedPlayPlugin).Assembly.GetName().Version ?? new Version(1, 0, 0);
+	public Version Version => typeof(TimedPlayPlugin).Assembly.GetName().Version ?? throw new InvalidOperationException(nameof(Version));
 
 	public Task OnLoaded() => Task.CompletedTask;
 
@@ -157,18 +163,20 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 
 		string minutesText = args[index + 1];
 
-		if (!double.TryParse(minutesText, NumberStyles.Float, CultureInfo.InvariantCulture, out double minutes) || (minutes <= 0) || (minutes > MaxMinutes)) {
+		// float.TryParse(string, NumberStyles, IFormatProvider) is the exact overload ASF itself calls, so it
+		// survives trimming. See the remark on this class for why the obvious alternatives do not.
+		if (!float.TryParse(minutesText, NumberStyles.Number, CultureInfo.InvariantCulture, out float minutes) || (minutes <= 0f) || (minutes > MaxMinutes)) {
 			return FormatAll(orderedTargets, $"{Command}: invalid minutes `{minutesText}`, expected a number greater than 0 and at most {MaxMinutes:0}.");
 		}
 
-		string? gameName = ((index + 2) < args.Length) ? string.Join(' ', args[(index + 2)..]) : null;
+		string? gameName = ((index + 2) < args.Length) ? string.Join(" ", args[(index + 2)..]) : null;
 
 		string[] responses = await Task.WhenAll(orderedTargets.Select(target => Start(target, gameIDs, gameName, minutes))).ConfigureAwait(false);
 
 		return string.Join(Environment.NewLine, responses);
 	}
 
-	private async Task<string> Start(Bot bot, HashSet<uint> gameIDs, string? gameName, double minutes) {
+	private async Task<string> Start(Bot bot, HashSet<uint> gameIDs, string? gameName, float minutes) {
 		string description = DescribeGames(gameIDs, gameName);
 
 		if (!bot.IsConnectedAndLoggedOn) {
@@ -229,10 +237,12 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 	}
 
 	private void OnSessionDue(Bot bot, Session session) {
-		if (!Sessions.TryRemove(bot.BotName, out Session? current) || !ReferenceEquals(current, session)) {
+		if (!session.IsActive) {
 			// Superseded by a newer session, so there is nothing left to stop.
 			return;
 		}
+
+		Sessions.TryRemove(bot.BotName, out _);
 
 		session.Cancel();
 
@@ -240,11 +250,9 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 	}
 
 	private void OnHeartbeat(Bot bot, Session session) {
-		if (!TryGetActiveSession(bot, out Session? current) || !ReferenceEquals(current, session)) {
-			return;
+		if (session.IsActive && bot.IsConnectedAndLoggedOn) {
+			_ = Reassert(bot, session);
 		}
-
-		_ = Reassert(bot, session);
 	}
 
 	private bool TryGetActiveSession(Bot bot, [NotNullWhen(true)] out Session? session) {
@@ -310,11 +318,11 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 			trimmed = trimmed[(slashIndex + 1)..];
 		}
 
-		return uint.TryParse(trimmed, NumberStyles.None, CultureInfo.InvariantCulture, out appID) && (appID > 0);
+		return uint.TryParse(trimmed, out appID) && (appID > 0);
 	}
 
 	private static string DescribeGames(IEnumerable<uint> gameIDs, string? gameName) {
-		string ids = string.Join('+', gameIDs.Select(static gameID => gameID.ToString(CultureInfo.InvariantCulture)));
+		string ids = string.Join("+", gameIDs.Select(static gameID => gameID.ToString(CultureInfo.InvariantCulture)));
 
 		return string.IsNullOrEmpty(gameName) ? ids : $"{ids} ({gameName})";
 	}
@@ -395,8 +403,16 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 		}
 
 		internal void Cancel() {
-			Interlocked.Exchange(ref _stopTimer, null)?.Dispose();
-			Interlocked.Exchange(ref _heartbeatTimer, null)?.Dispose();
+			// Timer.Dispose() is idempotent, so a plain swap is enough here and avoids Interlocked, which ASF
+			// never calls and which therefore does not survive its trimming.
+			Timer? stopTimer = _stopTimer;
+			Timer? heartbeatTimer = _heartbeatTimer;
+
+			_stopTimer = null;
+			_heartbeatTimer = null;
+
+			stopTimer?.Dispose();
+			heartbeatTimer?.Dispose();
 		}
 	}
 }
