@@ -169,11 +169,24 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 			return FormatAll(orderedTargets, $"{Command}: invalid minutes `{minutesText}`, expected a number greater than 0 and at most {MaxMinutes:0}.");
 		}
 
-		string? gameName = ((index + 2) < args.Length) ? string.Join(" ", args[(index + 2)..]) : null;
+		// ASF's trimming removes System.Range.StartAt and string.Join(string, params string[]), so neither
+		// array slicing with an explicit start nor the params overload may appear here.
+		string? gameName = null;
+
+		if ((index + 2) < args.Length) {
+			List<string> nameParts = new List<string>();
+
+			for (int offset = index + 2; offset < args.Length; offset++) {
+				nameParts.Add(args[offset]);
+			}
+
+			gameName = string.Join(" ", nameParts);
+		}
 
 		string[] responses = await Task.WhenAll(orderedTargets.Select(target => Start(target, gameIDs, gameName, minutes))).ConfigureAwait(false);
 
-		return string.Join(Environment.NewLine, responses);
+		// string.Join(string, params string[]) is trimmed away; the IEnumerable<string> overload is not.
+		return string.Join(Environment.NewLine, (IEnumerable<string>) responses);
 	}
 
 	private async Task<string> Start(Bot bot, HashSet<uint> gameIDs, string? gameName, float minutes) {
@@ -309,13 +322,13 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 		int slashIndex = trimmed.IndexOf('/');
 
 		if (slashIndex >= 0) {
-			string prefix = trimmed[..slashIndex];
+			string prefix = trimmed.Substring(0, slashIndex);
 
 			if (!prefix.Equals("app", StringComparison.OrdinalIgnoreCase) && !prefix.Equals("a", StringComparison.OrdinalIgnoreCase)) {
 				return false;
 			}
 
-			trimmed = trimmed[(slashIndex + 1)..];
+			trimmed = trimmed.Substring(slashIndex + 1);
 		}
 
 		return uint.TryParse(trimmed, out appID) && (appID > 0);

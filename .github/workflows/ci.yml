@@ -28,6 +28,23 @@ jobs:
         shell: pwsh
         run: ./build.ps1
 
+      # ASF's Windows release is a trimmed single-file build: ILLink drops every BCL member ASF itself never
+      # calls, so a plugin that touches one compiles fine and only throws MissingMethodException at runtime.
+      # Build a trimmed ASF and check the plugin against what actually survived.
+      - name: Produce a trimmed ASF reference set
+        shell: bash
+        run: |
+          git clone --depth 1 --recurse-submodules --shallow-submodules \
+            https://github.com/JustArchiNET/ArchiSteamFarm.git "${RUNNER_TEMP}/asf-src"
+          dotnet publish "${RUNNER_TEMP}/asf-src/ArchiSteamFarm/ArchiSteamFarm.csproj" \
+            -c Release -r win-x64 --self-contained true \
+            -p:PublishTrimmed=true -p:PublishSingleFile=false \
+            -o "${RUNNER_TEMP}/asf-trimmed"
+
+      - name: Check the plugin against the trimmed BCL
+        shell: pwsh
+        run: ./check-trimming.ps1 -TrimmedDirectory "$env:RUNNER_TEMP/asf-trimmed"
+
       - name: Package
         shell: pwsh
         run: |

@@ -87,14 +87,32 @@ System.MissingMethodException: Attempted to access a missing method.
 | `string.Join('+', xs)` char 分隔符 | `string.Join("+", xs)` |
 | `Interlocked.Exchange<T>()` | 普通赋值(`Timer.Dispose()` 本身是幂等的) |
 | `ReferenceEquals(a, b)` | 用现有的 `IsActive` 状态判断 |
+| `string.Join(string, params string[])` —— 例如 `string.Join(" ", 某个 string[])` | 强制走存活的 `IEnumerable<string>` 重载:`string.Join(" ", (IEnumerable<string>) arr)`,或先塞进 `List<string>` |
+| `array[start..]`(带**显式起点**的切片) —— 编译成 `System.Range.StartAt` | `Substring(start)` / `Substring(start, length)` |
 
-**规律很简单:照着 ASF 源码里已经出现过的东西写。** 提交前可以扫一遍:
+后两条是 v1.1.1 的翻车现场,特别隐蔽:
+
+- `string.Join` 的 `params string[]` 重载和 `IEnumerable<string>` 重载**同名同参数量**,肉眼看签名几乎一样,但只有后者被保留。
+- `x[..n]`(省略起点)不会用到 `Range.StartAt`,`x[n..]`(显式起点)才会 —— 所以同一个文件里一处能跑一处炸。
+
+### 别再靠人肉核对了
+
+`tools/ilcheck` 是一个 IL 级检查器:它读插件的调用点,再跟**裁剪后实际存活**的 BCL 成员逐一比对,直接告诉你哪几个被删了:
 
 ```powershell
-Select-String -Path <ASF 源码>\**\*.cs -Pattern '你要用的方法名'
+# 需要一个裁剪过的 ASF 目录(含 System.Private.CoreLib.dll,framework-dependent 发行版没有)
+dotnet publish <ASF 源码>\ArchiSteamFarm\ArchiSteamFarm.csproj -c Release -r win-x64 `
+    --self-contained true -p:PublishTrimmed=true -p:PublishSingleFile=false -o trimmed
+
+.\build.ps1
+.\check-trimming.ps1 -TrimmedDirectory .\trimmed
 ```
 
-这个 bug 在开发机上(未裁剪)完全复现不出来,只在用户装上之后才炸 —— 本插件的 v1.1.0 就是这么翻车的。
+CI 里已经接上了这一步,所以**这类 bug 以后会在构建期被拦下,而不是等用户装完才炸**。
+
+判据是 `存活的定义 ∪ ASF 自己的调用点` —— ILLink 会保留 App 真正需要的一切,所以 ASF 自己调用过的东西必然存活。
+
+这个 bug 在开发机上(未裁剪)完全复现不出来,只在用户装上之后才炸 —— 本插件的 v1.1.0 和 v1.1.1 都是这么翻车的。
 
 ---
 
