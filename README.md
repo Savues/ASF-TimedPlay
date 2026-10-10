@@ -172,7 +172,7 @@ public async Task<(bool Success, string Message)> Pause(bool permanent, ushort r
 playfor: 4235370 finished on Savues but pausing failed - 已經暫停自動掛卡！
 ```
 
-真正能清场的只有一条路:`Actions.Play([])` —— 空集合会走到 `ArchiHandler.PlayGames([])`,和 ASF 自己清场用的是同一个调用。本插件因此改成**先 `Actions.Play([])` 停游戏,再 `Actions.Pause(true)` 收尾**,并把「已經暫停」当作预期结果而非失败。
+真正能清场的只有一条路:`Actions.Play([])` —— 空集合会走到 `ArchiHandler.PlayGames([])`,和 ASF 自己清场用的是同一个调用。本插件因此改成**只用 `Actions.Play([])` 停游戏**,完全不碰 `Pause()`(见下一节)。
 
 ---
 
@@ -186,9 +186,25 @@ playfor: 4235370 finished on Savues but pausing failed - 已經暫停自動掛�
 
 实现 `IBotConnection`,在 `OnBotLoggedOn` 时立即恢复挂载。断线频繁的环境下这条是刚需。
 
-**3. 会话期间 `resume` 会被覆盖**
+**3. 挂卡状态原样还给你**
 
-刻意的设计:心跳调用 `Actions.Play()`,会重新暂停挂卡。也就是说 `playfor` 会话期间 bot 归插件管,直到计时结束。想提前交还控制权用 `playfor cancel`。
+这是插件唯一允许自己**暂时**改变挂卡的理由:用户主动让 bot 挂游戏,账号被 Steam 判定为「占用中」,挂卡必然要暂停,这是绕不开的。
+
+除此之外插件不再改动挂卡。做法是会话开始时记下 `bot.CardsFarmer.Paused`,到点停完游戏后:
+
+- 会话前**没**暂停 → 调 `Actions.Resume()`。这一步是必须的,因为 `Actions.Play()` 会设 `PermanentlyPaused`,而 ASF 自己的自动恢复(`CheckOccupationStatus` → `Resume(false)`)碰到永久暂停会直接拒绝,挂卡就再也回不来了。
+- 会话前**已经**暂停(你自己 `pause` 过)→ 什么都不做,保持暂停。
+
+实测:
+
+```
+# 会话前未暂停
+playfor: 4235370 finished on Savues, games stopped, cards farming 已繼續自動掛卡！
+# 会话前已暂停
+playfor: 4235370 finished on Savues, games stopped, cards farming left paused as it was
+```
+
+**会话期间 `resume` 会被覆盖**:心跳调用 `Actions.Play()`,会重新暂停挂卡。也就是说 `playfor` 会话期间 bot 归插件管,直到计时结束。想提前交还控制权用 `playfor cancel`(注意 `cancel` **不会**停游戏,游戏继续跑,挂卡也就继续保持暂停)。
 
 ---
 

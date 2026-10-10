@@ -199,6 +199,10 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 		// Make sure a previous timer can never fire on top of this one.
 		Abort(bot);
 
+		// Actions.Play() pauses the cards farmer permanently as a side effect, so remember what the user had
+		// before we touch anything. The session has to hand the bot back exactly as it found it.
+		bool wasCardsPaused = bot.CardsFarmer.Paused;
+
 		try {
 			(bool success, string message) = await bot.Actions.Play(gameIDs, gameName).ConfigureAwait(false);
 
@@ -213,7 +217,7 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 		}
 
 		TimeSpan duration = TimeSpan.FromMinutes(minutes);
-		Session session = new(this, bot, [.. gameIDs], gameName, duration);
+		Session session = new(this, bot, [.. gameIDs], gameName, duration, wasCardsPaused);
 
 		Sessions[bot.BotName] = session;
 
@@ -309,11 +313,13 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 				return;
 			}
 
-			// The farmer is already paused permanently by now, so "already paused" is the expected outcome
-			// rather than a failure.
-			(_, string pauseMessage) = await bot.Actions.Pause(permanent: true).ConfigureAwait(false);
+			// Hand the cards farmer back exactly as we found it. Actions.Play() set a permanent pause, which would
+			// otherwise outlive the session and leave the bot without idling forever - ASF's own automatic resume
+			// refuses to lift a permanent pause. Only resume when it was actually running beforehand, so a bot the
+			// user paused on purpose stays paused.
+			string cardsState = session.WasCardsPaused ? "left paused as it was" : bot.Actions.Resume().Message;
 
-			bot.ArchiLogger.LogGenericInfo($"{Command}: {session.Describe()} finished on {bot.BotName}, games stopped. {pauseMessage}");
+			bot.ArchiLogger.LogGenericInfo($"{Command}: {session.Describe()} finished on {bot.BotName}, games stopped, cards farming {cardsState}");
 		}
 		catch (Exception e) {
 			bot.ArchiLogger.LogGenericException(e);
@@ -367,20 +373,25 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 		private readonly Bot _bot;
 		private readonly string? _gameName;
 		private readonly TimeSpan _duration;
+		private readonly bool _wasCardsPaused;
 
 		private Timer? _stopTimer;
 		private Timer? _heartbeatTimer;
 		private DateTime _nextHeartbeat;
 
-		internal Session(TimedPlayPlugin plugin, Bot bot, uint[] gameIDs, string? gameName, TimeSpan duration) {
+		internal Session(TimedPlayPlugin plugin, Bot bot, uint[] gameIDs, string? gameName, TimeSpan duration, bool wasCardsPaused) {
 			_plugin = plugin;
 			_bot = bot;
 			GameIDs = gameIDs;
 			_gameName = gameName;
 			_duration = duration;
+			_wasCardsPaused = wasCardsPaused;
 
 			DueAt = DateTime.UtcNow + duration;
 		}
+
+		/// <summary>Whether the cards farmer was already paused before this session started.</summary>
+		internal bool WasCardsPaused => _wasCardsPaused;
 
 		internal uint[] GameIDs { get; }
 
