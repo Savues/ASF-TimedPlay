@@ -35,7 +35,7 @@ jobs:
           Copy-Item bin/Release/net10.0/TimedPlay.dll package/plugins/TimedPlay/
           if (Test-Path LICENSE) { Copy-Item LICENSE package/plugins/TimedPlay/ }
           if (Test-Path README.md) { Copy-Item README.md package/plugins/TimedPlay/ }
-          Compress-Archive -Path package -DestinationPath TimedPlay.zip -Force
+          Compress-Archive -Path package/plugins -DestinationPath TimedPlay.zip -Force
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

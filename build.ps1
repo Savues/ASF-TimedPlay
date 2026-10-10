@@ -48,7 +48,18 @@ if ($AsfDirectory) {
 elseif (-not (Test-LibReady)) {
     if (-not $AsfVersion) {
         $headers = @{ 'User-Agent' = 'TimedPlay-build' }
-        $release = Invoke-RestMethod 'https://api.github.com/repos/JustArchiNET/ArchiSteamFarm/releases/latest' -Headers $headers
+
+        # CI runners share an egress IP, so unauthenticated GitHub API calls get rate limited almost immediately.
+        if ($env:GITHUB_TOKEN) {
+            $headers['Authorization'] = "Bearer $env:GITHUB_TOKEN"
+        }
+
+        try {
+            $release = Invoke-RestMethod 'https://api.github.com/repos/JustArchiNET/ArchiSteamFarm/releases/latest' -Headers $headers
+        }
+        catch {
+            throw "Could not query the latest ASF release from the GitHub API: $($_.Exception.Message)`nPass -AsfVersion explicitly to skip this lookup."
+        }
 
         $AsfVersion = $release.tag_name
         $asset = $release.assets | Where-Object { $_.name -eq 'ASF-generic.zip' } | Select-Object -First 1
