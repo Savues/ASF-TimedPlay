@@ -116,8 +116,9 @@ if ($LASTEXITCODE -ne 0) {
     throw "Build failed with exit code $LASTEXITCODE."
 }
 
+# Match on the configuration segment only - directory separators differ between Windows and Linux CI.
 $dll = Get-ChildItem (Join-Path $root 'bin') -Recurse -Filter 'TimedPlay.dll' |
-    Where-Object { $_.DirectoryName -like "*\$Configuration\*" } |
+    Where-Object { $_.FullName -like "*$Configuration*" } |
     Select-Object -First 1
 
 if (-not $dll) {
