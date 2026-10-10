@@ -17,6 +17,14 @@
 	</PropertyGroup>
 
 	<ItemGroup>
+		<!-- tools\ holds the standalone trimming checker, which is its own project. Without this the SDK's
+		     default glob would compile its sources into the plugin. -->
+		<Compile Remove="tools\**\*.cs" />
+		<EmbeddedResource Remove="tools\**\*" />
+		<None Remove="tools\**\*" />
+	</ItemGroup>
+
+	<ItemGroup>
 		<!--
 			Both of these ship inside ASF itself, so reference them from the ASF folder and never copy them out.
 			Private=false is what keeps them out of bin\, which is why the output is a single TimedPlay.dll.
