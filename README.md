@@ -164,6 +164,10 @@ CI 会用 tag 的版本号覆盖程序集版本号,并把打包好的 `TimedPlay
 
 ---
 
+## License
+
+[MIT](LICENSE) © 2026 Savues
+
 ## 免责声明
 
 ASF 官方明确说明:**自定义插件完全不受官方支持**,加载后即视为脱离 vanilla ASF,出现问题请自行排查。
