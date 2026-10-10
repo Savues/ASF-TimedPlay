@@ -16,8 +16,8 @@ using SteamKit2;
 namespace TimedPlay;
 
 /// <summary>
-///     Adds a <c>playfor</c> command that launches one or more games and, after a configured amount of time, stops
-///     cards farming so the game is no longer "being played".
+///     Adds a <c>playfor</c> command - also reachable as the one-letter <c>f</c> - that launches one or more games
+///     and, after a configured amount of time, stops cards farming so the game is no longer "being played".
 /// </summary>
 /// <remarks>
 ///     Two things routinely kill a plain <c>play</c> session, and both are handled here:
@@ -41,6 +41,7 @@ namespace TimedPlay;
 [Export(typeof(IPlugin))]
 internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnection {
 	private const string Command = "playfor";
+	private const string CommandShort = "f";
 	private const string SubCommandStatus = "status";
 	private const string SubCommandCancel = "cancel";
 
@@ -50,13 +51,16 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 	/// <summary>Timer due times are an unsigned int of milliseconds, which caps out at roughly 49.7 days.</summary>
 	private const float MaxMinutes = 43000f;
 
+	/// <summary>Duration applied when the command is given without one.</summary>
+	private const float DefaultMinutes = 35f;
+
 	/// <summary>
 	///     How often the games are re-asserted. Steam occasionally drops a playing session on its own, and ASF
 	///     clears it without restoring anything, so a session left alone silently stops idling well before its deadline.
 	/// </summary>
 	private static readonly TimeSpan HeartbeatInterval = TimeSpan.FromMinutes(2);
 
-	private const string Usage = $"{Command} [Bots] <AppIDs> <Minutes> [GameName] | {Command} [Bots] {SubCommandStatus} | {Command} [Bots] {SubCommandCancel}";
+	private const string Usage = $"{Command}|{CommandShort} [Bots] <AppIDs> [Minutes] [GameName] | {Command}|{CommandShort} [Bots] {SubCommandStatus} | {Command}|{CommandShort} [Bots] {SubCommandCancel}";
 
 	private readonly ConcurrentDictionary<string, Session> Sessions = new(StringComparer.OrdinalIgnoreCase);
 
@@ -94,7 +98,7 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 	}
 
 	public async Task<string?> OnBotCommand(Bot bot, EAccess access, string message, string[] args, ulong steamID = 0) {
-		if ((args.Length < 2) || !args[0].Equals(Command, StringComparison.OrdinalIgnoreCase)) {
+		if ((args.Length < 2) || !IsCommand(args[0])) {
 			return null;
 		}
 
@@ -135,10 +139,6 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 			return null;
 		}
 
-		if ((index + 1) >= args.Length) {
-			return FormatUsage(orderedTargets);
-		}
-
 		string[] gameTokens = args[index].Split(SharedInfo.ListElementSeparators, StringSplitOptions.RemoveEmptyEntries);
 
 		if (gameTokens.Length == 0) {
@@ -161,22 +161,33 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 			return FormatAll(orderedTargets, $"{Command}: too many AppIDs, the limit is {MaxGamesPlayedConcurrently}.");
 		}
 
-		string minutesText = args[index + 1];
+		// The duration is optional, which leaves "<AppIDs> [GameName]" ambiguous, so it is resolved by type: a
+		// token that parses as a number is the duration, anything else already starts the game name. A game whose
+		// name begins with a number therefore needs an explicit duration, e.g. "f 730 35 2 Fast 2 Furious".
+		float minutes = DefaultMinutes;
+		int nameStart = index + 1;
 
-		// float.TryParse(string, NumberStyles, IFormatProvider) is the exact overload ASF itself calls, so it
-		// survives trimming. See the remark on this class for why the obvious alternatives do not.
-		if (!float.TryParse(minutesText, NumberStyles.Number, CultureInfo.InvariantCulture, out float minutes) || (minutes <= 0f) || (minutes > MaxMinutes)) {
-			return FormatAll(orderedTargets, $"{Command}: invalid minutes `{minutesText}`, expected a number greater than 0 and at most {MaxMinutes:0}.");
+		if ((index + 1) < args.Length) {
+			// float.TryParse(string, NumberStyles, IFormatProvider) is the exact overload ASF itself calls, so it
+			// survives trimming. See the remark on this class for why the obvious alternatives do not.
+			if (float.TryParse(args[index + 1], NumberStyles.Number, CultureInfo.InvariantCulture, out float parsedMinutes)) {
+				if ((parsedMinutes <= 0f) || (parsedMinutes > MaxMinutes)) {
+					return FormatAll(orderedTargets, $"{Command}: invalid minutes `{args[index + 1]}`, expected a number greater than 0 and at most {MaxMinutes:0}.");
+				}
+
+				minutes = parsedMinutes;
+				nameStart = index + 2;
+			}
 		}
 
 		// ASF's trimming removes System.Range.StartAt and string.Join(string, params string[]), so neither
 		// array slicing with an explicit start nor the params overload may appear here.
 		string? gameName = null;
 
-		if ((index + 2) < args.Length) {
+		if (nameStart < args.Length) {
 			List<string> nameParts = new List<string>();
 
-			for (int offset = index + 2; offset < args.Length; offset++) {
+			for (int offset = nameStart; offset < args.Length; offset++) {
 				nameParts.Add(args[offset]);
 			}
 
@@ -188,6 +199,8 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 		// string.Join(string, params string[]) is trimmed away; the IEnumerable<string> overload is not.
 		return string.Join(Environment.NewLine, (IEnumerable<string>) responses);
 	}
+
+	private static bool IsCommand(string value) => value.Equals(Command, StringComparison.OrdinalIgnoreCase) || value.Equals(CommandShort, StringComparison.OrdinalIgnoreCase);
 
 	private async Task<string> Start(Bot bot, HashSet<uint> gameIDs, string? gameName, float minutes) {
 		string description = DescribeGames(gameIDs, gameName);

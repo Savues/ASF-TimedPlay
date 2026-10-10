@@ -28,31 +28,45 @@ InitPlugins() TimedPlayPlugin 加载成功！
 ## 命令
 
 ```
-playfor [Bots] <AppIDs> <Minutes> [GameName]    启动游戏,Minutes 分钟后自动停止
-playfor [Bots] status                           查看剩余时间与心跳状态
-playfor [Bots] cancel                           取消计时(游戏继续跑)
+playfor|f [Bots] <AppIDs> [Minutes] [GameName]  启动游戏,Minutes 分钟后自动停止(省略则 35 分钟)
+playfor|f [Bots] status                         查看剩余时间与心跳状态
+playfor|f [Bots] cancel                         取消计时(游戏继续跑)
 ```
+
+`f` 是 `playfor` 的单字母别名,两者完全等价。
 
 | 参数 | 说明 |
 |---|---|
 | `[Bots]` | 可选。支持 `@all` / `@farming` / `@idle`、`A..C` 区间、正则,与 ASF 内置命令完全一致。省略则作用于发出命令的 bot |
 | `<AppIDs>` | 支持 `730`、`app/730`、`a/730`,多个用逗号分隔,最多 32 个(Steam 网络硬限制) |
-| `<Minutes>` | 支持小数,`0.5` = 30 秒,`1800` = 30 小时。上限 43000 分钟(约 29.8 天) |
+| `[Minutes]` | 可选,省略即 **35 分钟**。支持小数,`0.5` = 30 秒,`1800` = 30 小时。上限 43000 分钟(约 29.8 天) |
 | `[GameName]` | 可选,作为 Steam 好友看到的状态文字 |
+
+因为时长可省略,`[Minutes]` 和 `[GameName]` 之间靠类型区分:**紧跟 AppIDs 的第一个 token 如果能解析成数字,就是时长,否则就是游戏名的开头。**
+
+```
+!f 730                        → 730,挂 35 分钟
+!f 730 Hollow Knight          → 730,挂 35 分钟,显示名 "Hollow Knight"
+!f 730 35 Hollow Knight       → 730,挂 35 分钟,显示名 "Hollow Knight"
+```
+
+代价是:**游戏名以数字开头时必须把时长写出来**,例如 `!f 730 35 2 Fast 2 Furious`。同理,把时长手滑写成非数字会被当成游戏名,然后按默认 35 分钟跑。
 
 Steam 聊天需加 `!` 前缀;IPC 模式不需要。
 
 ### 例子
 
 ```
-!playfor app/730 30                    CS2 挂 30 分钟
-!playfor 730 0.5                       挂 30 秒(适合测试)
-!playfor app/730,440 45                两个游戏并行挂 45 分钟
-!playfor app/730 30 Counter-Strike    带自定义显示名
-!playfor @all app/730 30               所有 bot 同时挂
-!playfor A..C app/730 30               区间
-!playfor status                        查剩余时间
-!playfor cancel                        撤销计时,游戏不停
+!f 730                                  CS2 挂 35 分钟(默认时长)
+!f 730 30                               CS2 挂 30 分钟
+!playfor 730 0.5                        挂 30 秒(适合测试)
+!f app/730,440 45                       两个游戏并行挂 45 分钟
+!f app/730 30 Counter-Strike            带自定义显示名
+!f 730 Hollow Knight                    默认 35 分钟 + 显示名
+!playfor @all app/730 30                所有 bot 同时挂
+!playfor A..C app/730 30                区间
+!f status                               查剩余时间
+!f cancel                               撤销计时,游戏不停
 ```
 
 ---
