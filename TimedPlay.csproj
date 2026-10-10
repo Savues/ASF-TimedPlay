@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<TargetFramework>net10.0</TargetFramework>
+		<AssemblyName>TimedPlay</AssemblyName>
+		<RootNamespace>TimedPlay</RootNamespace>
+		<Nullable>enable</Nullable>
+		<LangVersion>preview</LangVersion>
+		<AssemblyVersion>1.1.0.0</AssemblyVersion>
+		<FileVersion>1.1.0.0</FileVersion>
+		<Description>ASF plugin adding a `playfor` command that runs games for a fixed amount of time and then stops them.</Description>
+	</PropertyGroup>
+
+	<PropertyGroup>
+		<!-- Folder holding the DLLs from your ASF-generic release. Override with -p:AsfDirectory=... -->
+		<AsfDirectory Condition="'$(AsfDirectory)' == ''">lib</AsfDirectory>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<!--
+			Both of these ship inside ASF itself, so reference them from the ASF folder and never copy them out.
+			Private=false is what keeps them out of bin\, which is why the output is a single TimedPlay.dll.
+			Referencing the ASF copies (instead of the NuGet packages) also avoids assembly version conflicts.
+		-->
+		<Reference Include="ArchiSteamFarm">
+			<HintPath>$(AsfDirectory)\ArchiSteamFarm.dll</HintPath>
+			<Private>false</Private>
+		</Reference>
+		<Reference Include="System.Composition.AttributedModel">
+			<HintPath>$(AsfDirectory)\System.Composition.AttributedModel.dll</HintPath>
+			<Private>false</Private>
+		</Reference>
+		<Reference Include="SteamKit2">
+			<HintPath>$(AsfDirectory)\SteamKit2.dll</HintPath>
+			<Private>false</Private>
+		</Reference>
+	</ItemGroup>
+
+</Project>

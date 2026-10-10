@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Build
+        shell: pwsh
+        run: ./build.ps1
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path package/plugins/TimedPlay | Out-Null
+          Copy-Item bin/Release/net10.0/TimedPlay.dll package/plugins/TimedPlay/
+          if (Test-Path LICENSE) { Copy-Item LICENSE package/plugins/TimedPlay/ }
+          if (Test-Path README.md) { Copy-Item README.md package/plugins/TimedPlay/ }
+          Compress-Archive -Path package -DestinationPath TimedPlay.zip -Force
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TimedPlay
+          path: TimedPlay.zip
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            TimedPlay.zip \
+            --title "${{ github.ref_name }}" \
+            --generate-notes
