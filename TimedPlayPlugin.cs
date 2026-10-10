@@ -296,14 +296,24 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 
 	private static async Task StopAsync(Bot bot, Session session) {
 		try {
-			(bool success, string message) = await bot.Actions.Pause(permanent: true).ConfigureAwait(false);
+			// Actions.Pause() never touches the game list: it short-circuits whenever the farmer is already
+			// paused - which it always is here, because Actions.Play() pauses it when the session starts - and the
+			// only branch that would clear the games is the non-permanent one. An empty Play() is what actually
+			// stops the games; it reaches ArchiHandler.PlayGames([]), which is the same call ASF makes when it
+			// clears a session by itself.
+			(bool stopSuccess, string stopMessage) = await bot.Actions.Play([]).ConfigureAwait(false);
 
-			if (success) {
-				bot.ArchiLogger.LogGenericInfo($"{Command}: {session.Describe()} finished on {bot.BotName}, cards farming paused permanently.");
+			if (!stopSuccess) {
+				bot.ArchiLogger.LogGenericWarning($"{Command}: {session.Describe()} finished on {bot.BotName} but stopping the games failed - {stopMessage}");
+
+				return;
 			}
-			else {
-				bot.ArchiLogger.LogGenericWarning($"{Command}: {session.Describe()} finished on {bot.BotName} but pausing failed - {message}");
-			}
+
+			// The farmer is already paused permanently by now, so "already paused" is the expected outcome
+			// rather than a failure.
+			(_, string pauseMessage) = await bot.Actions.Pause(permanent: true).ConfigureAwait(false);
+
+			bot.ArchiLogger.LogGenericInfo($"{Command}: {session.Describe()} finished on {bot.BotName}, games stopped. {pauseMessage}");
 		}
 		catch (Exception e) {
 			bot.ArchiLogger.LogGenericException(e);

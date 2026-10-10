@@ -143,6 +143,37 @@ Steam 连接断开时,ASF 重连后**不会恢复**之前挂的游戏。实测�
 
 这次会话实际只挂了 **4 分 9 秒**,而 Steam 每约 30 分钟才批量结算一次时长,所以结果就是 0。
 
+### 坑三:`Actions.Pause()` 根本不会停游戏
+
+到点停止时最自然的写法是 `bot.Actions.Pause(permanent: true)`,但它是**停不了游戏的**(`ArchiSteamFarm/Steam/Interaction/Actions.cs`):
+
+```csharp
+public async Task<(bool Success, string Message)> Pause(bool permanent, ushort resumeInSeconds = 0) {
+    if (Bot.CardsFarmer.Paused) {
+        return (false, Strings.BotAutomaticIdlingPausedAlready);   // 直接返回,什么都没做
+    }
+
+    await Bot.CardsFarmer.Pause(permanent).ConfigureAwait(false);
+
+    if (!permanent && !Bot.BotConfig.GamesPlayedWhileIdle.IsEmpty) {
+        await Bot.ArchiHandler.PlayGames([], Bot.BotConfig.CustomGamePlayedWhileIdle).ConfigureAwait(false);
+        //  ↑ 只有非 permanent 分支才清空游戏列表
+    }
+```
+
+两个问题叠在一起:
+
+1. `playfor` 一开始就调了 `Actions.Play()`,它内部会 `Pause(true)` —— 所以**会话期间 farmer 永远是 paused 状态**,到点时 `Pause` 第一行就短路返回。
+2. 就算没短路,`permanent: true` 分支本来就不含 `PlayGames([])`。
+
+结果就是**游戏从头跑到尾,一次都没停过**,而日志还会打出一条看起来像失败的:
+
+```
+playfor: 4235370 finished on Savues but pausing failed - 已經暫停自動掛卡！
+```
+
+真正能清场的只有一条路:`Actions.Play([])` —— 空集合会走到 `ArchiHandler.PlayGames([])`,和 ASF 自己清场用的是同一个调用。本插件因此改成**先 `Actions.Play([])` 停游戏,再 `Actions.Pause(true)` 收尾**,并把「已經暫停」当作预期结果而非失败。
+
 ---
 
 ## 稳定性设计
