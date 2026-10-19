@@ -151,10 +151,8 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 			if (!TryParseAppId(token, out uint appID)) {
 				return FormatAll(orderedTargets, $"{Command}: invalid AppID `{token}`.");
 			}
-
-			if (!gameIDs.Add(appID)) {
-				return FormatAll(orderedTargets, $"{Command}: duplicate AppID `{token}`.");
-			}
+			// HashSet.Add silently ignores duplicates, which is exactly what we want here.
+			gameIDs.Add(appID);
 		}
 
 		if (gameIDs.Count > MaxGamesPlayedConcurrently) {
