@@ -3,12 +3,11 @@ name: CI
 on:
   push:
     branches: [ main ]
-    tags: [ 'v*' ]
   pull_request:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -59,14 +58,3 @@ jobs:
         with:
           name: TimedPlay
           path: TimedPlay.zip
-
-      - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/v')
-        shell: bash
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release create "${{ github.ref_name }}" \
-            TimedPlay.zip \
-            --title "${{ github.ref_name }}" \
-            --generate-notes

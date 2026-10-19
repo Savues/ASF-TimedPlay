@@ -237,7 +237,7 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 
 		bot.ArchiLogger.LogGenericInfo($"{Command}: {description} started on {bot.BotName}, stopping in {FormatDuration(duration)} (heartbeat every {FormatDuration(HeartbeatInterval)}).");
 
-		return Format(bot, $"started {description} - will be stopped in {FormatDuration(duration)}");
+		return Format(bot, $"started {description} - will be stopped in {FormatDuration(duration)} (check: `{CommandShort} {SubCommandStatus}`, stop early: `{CommandShort} {SubCommandCancel}`)");
 	}
 
 	private string GetStatus(Bot bot) {
@@ -278,8 +278,16 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 	}
 
 	private void OnHeartbeat(Bot bot, Session session) {
-		if (session.IsActive && bot.IsConnectedAndLoggedOn) {
+		if (!session.IsActive) {
+			return;
+		}
+
+		if (bot.IsConnectedAndLoggedOn) {
+			bot.ArchiLogger.LogGenericInfo($"{Command}: heartbeat - {session.Describe()} is being played on {bot.BotName}, stopping in {FormatDuration(session.Remaining)}.");
+
 			_ = Reassert(bot, session);
+		} else {
+			bot.ArchiLogger.LogGenericWarning($"{Command}: heartbeat - {session.Describe()} is not being played on {bot.BotName} because the bot is offline, stopping in {FormatDuration(session.Remaining)}.");
 		}
 	}
 
