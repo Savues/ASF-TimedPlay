@@ -44,6 +44,7 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 	private const string CommandShort = "f";
 	private const string SubCommandStatus = "status";
 	private const string SubCommandCancel = "cancel";
+	private const string SubCommandStop = "stop";
 
 	/// <summary>Hard limit imposed by the Steam network; ASF declares it internally, so it is repeated here.</summary>
 	private const int MaxGamesPlayedConcurrently = 32;
@@ -54,13 +55,16 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 	/// <summary>Duration applied when the command is given without one.</summary>
 	private const float DefaultMinutes = 35f;
 
+	/// <summary>Interval between automatic std executions. The server-side rate limit is 5 minutes.</summary>
+	private static readonly TimeSpan AutoStdInterval = TimeSpan.FromMinutes(6);
+
 	/// <summary>
 	///     How often the games are re-asserted. Steam occasionally drops a playing session on its own, and ASF
 	///     clears it without restoring anything, so a session left alone silently stops idling well before its deadline.
 	/// </summary>
 	private static readonly TimeSpan HeartbeatInterval = TimeSpan.FromMinutes(2);
 
-	private const string Usage = $"{Command}|{CommandShort} [Bots] <AppIDs> [Minutes] [GameName] | {Command}|{CommandShort} [Bots] {SubCommandStatus} | {Command}|{CommandShort} [Bots] {SubCommandCancel}";
+	private const string Usage = $"{Command}|{CommandShort} [Bots] <AppIDs> [Minutes] [GameName] | {Command}|{CommandShort} [Bots] {SubCommandStatus} | {Command}|{CommandShort} [Bots] {SubCommandCancel} | {Command}|{CommandShort} [Bots] {SubCommandStop}";
 
 	private readonly ConcurrentDictionary<string, Session> Sessions = new(StringComparer.OrdinalIgnoreCase);
 
@@ -74,7 +78,7 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 	public Version Version => typeof(TimedPlayPlugin).Assembly.GetName().Version ?? throw new InvalidOperationException(nameof(Version));
 
 	public Task OnLoaded() {
-		_stdDumpTimer = new Timer(ExecuteStdDump, null, TimeSpan.FromMinutes(10), TimeSpan.FromMinutes(10));
+		_stdDumpTimer = new Timer(ExecuteStdDump, null, AutoStdInterval, AutoStdInterval);
 
 		return Task.CompletedTask;
 	}
@@ -160,6 +164,14 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 			}
 
 			return string.Join(Environment.NewLine, orderedTargets.Select(Cancel));
+		}
+
+		if (subCommand.Equals(SubCommandStop, StringComparison.OrdinalIgnoreCase)) {
+			if (access < EAccess.Master) {
+				return null;
+			}
+
+			return string.Join(Environment.NewLine, orderedTargets.Select(Stop));
 		}
 
 		if (access < EAccess.Master) {
@@ -264,7 +276,7 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 
 		bot.ArchiLogger.LogGenericInfo($"{Command}: {description} started on {bot.BotName}, stopping in {FormatDuration(duration)} (heartbeat every {FormatDuration(HeartbeatInterval)}).");
 
-		return Format(bot, $"started {description} - will be stopped in {FormatDuration(duration)} (check: `{CommandShort} {SubCommandStatus}`, stop early: `{CommandShort} {SubCommandCancel}`)");
+		return Format(bot, $"started {description} - will be stopped in {FormatDuration(duration)} (check: `{CommandShort} {SubCommandStatus}`, stop now: `{CommandShort} {SubCommandStop}`, detach timer only: `{CommandShort} {SubCommandCancel}`)");
 	}
 
 	private string GetStatus(Bot bot) {
@@ -283,6 +295,17 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 		session.Cancel();
 
 		return Format(bot, $"{Command}: timer for {session.Describe()} cancelled, the game keeps running.");
+	}
+
+	private string Stop(Bot bot) {
+		if (!Sessions.TryRemove(bot.BotName, out Session? session)) {
+			return Format(bot, $"{Command}: no active timer to stop.");
+		}
+
+		session.Cancel();
+		_ = StopAsync(bot, session);
+
+		return Format(bot, $"{Command}: stopping {session.Describe()} now, cards farming state will be restored.");
 	}
 
 	private void Abort(Bot bot) {

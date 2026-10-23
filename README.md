@@ -31,6 +31,7 @@ InitPlugins() TimedPlayPlugin 加载成功！
 playfor|f [Bots] <AppIDs> [Minutes] [GameName]  启动游戏,Minutes 分钟后自动停止(省略则 35 分钟)
 playfor|f [Bots] status                         查看剩余时间与心跳状态
 playfor|f [Bots] cancel                         取消计时(游戏继续跑)
+playfor|f [Bots] stop                           立即停止游戏并恢复挂卡状态
 ```
 
 `f` 是 `playfor` 的单字母别名,两者完全等价。
@@ -56,7 +57,7 @@ Steam 聊天需加 `!` 前缀;IPC 模式不需要。
 
 ### 自动执行 `std`
 
-插件加载后每 **10 分钟**自动对所有已登录的 bot 执行一次 `std` 命令(SteamTokenDumperPlugin 的手动刷新),驱动令牌数据更及时地提交。
+插件加载后每 **6 分钟**自动对所有已登录的 bot 执行一次 `std` 命令(SteamTokenDumperPlugin 的手动刷新),驱动令牌数据更及时地提交。
 执行结果会写入 ASF 日志,关键字 `[TimedPlay] auto std`。
 SteamTokenDumperPlugin 服务端有 5 分钟提交限流,高频触发是安全的,未到间隔的提交会被自动跳过。
 
@@ -73,6 +74,7 @@ SteamTokenDumperPlugin 服务端有 5 分钟提交限流,高频触发是安全�
 !playfor A..C app/730 30                区间
 !f status                               查剩余时间
 !f cancel                               撤销计时,游戏不停
+!f stop                                 立即停止游戏,恢复挂卡
 ```
 
 ---
