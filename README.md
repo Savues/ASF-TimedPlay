@@ -54,6 +54,12 @@ playfor|f [Bots] cancel                         取消计时(游戏继续跑)
 
 Steam 聊天需加 `!` 前缀;IPC 模式不需要。
 
+### 自动执行 `std`
+
+插件加载后每 **10 分钟**自动对所有已登录的 bot 执行一次 `std` 命令(SteamTokenDumperPlugin 的手动刷新),驱动令牌数据更及时地提交。
+执行结果会写入 ASF 日志,关键字 `[TimedPlay] auto std`。
+SteamTokenDumperPlugin 服务端有 5 分钟提交限流,高频触发是安全的,未到间隔的提交会被自动跳过。
+
 ### 例子
 
 ```

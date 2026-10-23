@@ -6,8 +6,8 @@
 		<RootNamespace>TimedPlay</RootNamespace>
 		<Nullable>enable</Nullable>
 		<LangVersion>preview</LangVersion>
-		<AssemblyVersion>1.4.0.0</AssemblyVersion>
-		<FileVersion>1.4.0.0</FileVersion>
+		<AssemblyVersion>1.5.0.0</AssemblyVersion>
+		<FileVersion>1.5.0.0</FileVersion>
 		<Description>ASF plugin adding a `playfor` command that runs games for a fixed amount of time and then stops them.</Description>
 	</PropertyGroup>
 

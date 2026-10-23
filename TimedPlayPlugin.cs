@@ -64,13 +64,20 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 
 	private readonly ConcurrentDictionary<string, Session> Sessions = new(StringComparer.OrdinalIgnoreCase);
 
+	/// <summary>Timer for periodic std command execution.</summary>
+	private Timer? _stdDumpTimer;
+
 	[JsonInclude]
 	public string Name => nameof(TimedPlayPlugin);
 
 	[JsonInclude]
 	public Version Version => typeof(TimedPlayPlugin).Assembly.GetName().Version ?? throw new InvalidOperationException(nameof(Version));
 
-	public Task OnLoaded() => Task.CompletedTask;
+	public Task OnLoaded() {
+		_stdDumpTimer = new Timer(ExecuteStdDump, null, TimeSpan.FromMinutes(10), TimeSpan.FromMinutes(10));
+
+		return Task.CompletedTask;
+	}
 
 	public Task OnBotInit(Bot bot) => Task.CompletedTask;
 
@@ -78,6 +85,26 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 		Abort(bot);
 
 		return Task.CompletedTask;
+	}
+
+	private async void ExecuteStdDump(object? state = null) {
+		HashSet<Bot>? bots = Bot.GetBots("@all");
+
+		if ((bots == null) || (bots.Count == 0)) {
+			ArchiSteamFarm.Core.ASF.ArchiLogger.LogGenericWarning("[TimedPlay] auto std skipped: no bots resolved");
+
+			return;
+		}
+
+		foreach (Bot bot in bots.Where(static bot => bot.IsConnectedAndLoggedOn)) {
+			try {
+				string? response = await bot.Commands.Response(EAccess.Owner, "std").ConfigureAwait(false);
+
+				bot.ArchiLogger.LogGenericInfo($"[TimedPlay] auto std for {bot.BotName}: {response ?? "<no response>"}");
+			} catch (Exception e) {
+				bot.ArchiLogger.LogGenericException(e);
+			}
+		}
 	}
 
 	public Task OnBotLoggedOn(Bot bot) {
