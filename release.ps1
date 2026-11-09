@@ -90,12 +90,14 @@ $assemblyVersion = ($versionParts[0..3] -join '.')
 $tagName = "v$Version"
 
 $csprojPath = Join-Path $repoRoot 'TimedPlay.csproj'
-$csproj = [IO.File]::ReadAllText($csprojPath)
-$csproj = [Text.RegularExpressions.Regex]::Replace($csproj, '<AssemblyVersion>[^<]*</AssemblyVersion>', "<AssemblyVersion>$assemblyVersion</AssemblyVersion>")
-$csproj = [Text.RegularExpressions.Regex]::Replace($csproj, '<FileVersion>[^<]*</FileVersion>', "<FileVersion>$assemblyVersion</FileVersion>")
-[IO.File]::WriteAllText($csprojPath, $csproj)
+$originalCsproj = [IO.File]::ReadAllText($csprojPath)
 
-Write-Host "Version $assemblyVersion / tag $tagName" -ForegroundColor Cyan
+try {
+	$csproj = [Text.RegularExpressions.Regex]::Replace($originalCsproj, '<AssemblyVersion>[^<]*</AssemblyVersion>', "<AssemblyVersion>$assemblyVersion</AssemblyVersion>")
+	$csproj = [Text.RegularExpressions.Regex]::Replace($csproj, '<FileVersion>[^<]*</FileVersion>', "<FileVersion>$assemblyVersion</FileVersion>")
+	[IO.File]::WriteAllText($csprojPath, $csproj)
+
+	Write-Host "Version $assemblyVersion / tag $tagName" -ForegroundColor Cyan
 
 # Build -------------------------------------------------------------------------------------------------------
 
@@ -142,10 +144,26 @@ foreach ($extra in @('LICENSE', 'README.md')) {
 	}
 }
 
-Compress-Archive -Path (Join-Path $stageRoot 'plugins') -DestinationPath $zipPath -Force
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+$zipStream = [System.IO.File]::Open($zipPath, [System.IO.FileMode]::Create)
+$archive = New-Object System.IO.Compression.ZipArchive($zipStream, [System.IO.Compression.ZipArchiveMode]::Create)
+
+try {
+	Get-ChildItem -Path (Join-Path $stageRoot 'plugins') -Recurse -File | ForEach-Object {
+		$relative = $_.FullName.Substring($stageRoot.Length + 1).Replace('\', '/')
+		[System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, $_.FullName, $relative) | Out-Null
+	}
+}
+finally {
+	$archive.Dispose()
+	$zipStream.Dispose()
+}
+
 Remove-Item -LiteralPath $stageRoot -Recurse -Force
 
-Write-Host "Packaged $zipPath" -ForegroundColor Cyan
+Write-Host "Packaged $zipPath (POSIX normalized entries)" -ForegroundColor Cyan
 
 # Authentication ----------------------------------------------------------------------------------------------
 
@@ -191,6 +209,17 @@ Write-Host "Publishing to $slug" -ForegroundColor Cyan
 $repoInfo = Invoke-Api -Method Get -Uri $apiBase
 $branch = $repoInfo.default_branch
 $headCommit = Invoke-Api -Method Get -Uri "$apiBase/commits/$branch"
+
+# Check for untracked files -----------------------------------------------------------------------------------
+
+$untracked = @(Invoke-Git @('ls-files', '--others', '--exclude-standard') | Where-Object { $_ })
+
+if ($untracked.Count -gt 0) {
+	Write-Host "Warning: Found $($untracked.Count) untracked file(s) that will NOT be included in the release commit:" -ForegroundColor Yellow
+	foreach ($item in $untracked) {
+		Write-Host "  $item" -ForegroundColor Yellow
+	}
+}
 
 $tracked = @(Invoke-Git @('ls-files') | Where-Object { $_ })
 
@@ -284,3 +313,22 @@ $asset = Invoke-RestMethod -Method Post -Uri $uploadUri -Headers $script:Headers
 
 Write-Host "Released $tagName -> $($release.html_url)" -ForegroundColor Green
 Write-Host "Asset: $($asset.browser_download_url)" -ForegroundColor Green
+
+# Local Git synchronization (graceful fallback) --------------------------------------------------------------
+
+try {
+	Write-Host "Synchronizing local branch $branch with remote..." -ForegroundColor Cyan
+	Invoke-Git @('fetch', 'origin', $branch)
+	Invoke-Git @('reset', '--soft', "origin/$branch")
+	Write-Host "Local branch $branch is now in sync with origin/$branch." -ForegroundColor Green
+}
+catch {
+	Write-Host "Note: Could not automatically sync local git state (network or credential restriction): $($_.Exception.Message)" -ForegroundColor Yellow
+	Write-Host "To sync manually when online, run: git fetch origin && git reset --soft origin/$branch" -ForegroundColor Yellow
+}
+}
+catch {
+	Write-Host "Release failed. Restoring $csprojPath ..." -ForegroundColor Yellow
+	[IO.File]::WriteAllText($csprojPath, $originalCsproj)
+	throw
+}

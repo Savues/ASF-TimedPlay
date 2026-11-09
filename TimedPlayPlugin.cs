@@ -129,20 +129,26 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 	}
 
 	public async Task<string?> OnBotCommand(Bot bot, EAccess access, string message, string[] args, ulong steamID = 0) {
-		if ((args.Length < 2) || !IsCommand(args[0])) {
+		if ((args.Length < 1) || !IsCommand(args[0])) {
 			return null;
 		}
 
-		// Optional [Bots] argument, resolved exactly like ASF core does (@all/@farming/@idle, ranges, regex).
-		// Anything that parses as an AppID can never be a bot list, which keeps the two from being ambiguous.
-		HashSet<Bot>? targets = TryParseAppId(args[1], out _) ? null : Bot.GetBots(args[1]);
-
-		if (!((targets is { Count: > 0 }) && (args.Length > 2))) {
-			targets = null;
+		if (access < EAccess.Operator) {
+			return null;
 		}
 
+		if (args.Length == 1) {
+			return FormatUsage([bot]);
+		}
+
+		// Optional [Bots] argument, resolved exactly like ASF core does (@all/@farming/@idle, ranges, regex).
+		// Disambiguation order:
+		// 1. If args[1] is a known subcommand or a valid AppID list, the target is implicitly the issuing bot.
+		// 2. Otherwise, treat args[1] as a bot list.
+		HashSet<Bot>? targets = (IsSubCommand(args[1]) || IsAppIdList(args[1])) ? null : Bot.GetBots(args[1]);
+
 		int index = (targets != null) ? 2 : 1;
-		Bot[] orderedTargets = (targets ?? new HashSet<Bot> { bot }).OrderBy(static target => target.BotName, StringComparer.OrdinalIgnoreCase).ToArray();
+		Bot[] orderedTargets = (targets ?? [bot]).OrderBy(static target => target.BotName, StringComparer.OrdinalIgnoreCase).ToArray();
 
 		if (index >= args.Length) {
 			return FormatUsage(orderedTargets);
@@ -151,15 +157,11 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 		string subCommand = args[index];
 
 		if (subCommand.Equals(SubCommandStatus, StringComparison.OrdinalIgnoreCase)) {
-			if (access < EAccess.Operator) {
-				return null;
-			}
-
 			return string.Join(Environment.NewLine, orderedTargets.Select(GetStatus));
 		}
 
 		if (subCommand.Equals(SubCommandCancel, StringComparison.OrdinalIgnoreCase)) {
-			if (access < EAccess.Operator) {
+			if (access < EAccess.Master) {
 				return null;
 			}
 
@@ -239,6 +241,8 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 
 	private static bool IsCommand(string value) => value.Equals(Command, StringComparison.OrdinalIgnoreCase) || value.Equals(CommandShort, StringComparison.OrdinalIgnoreCase);
 
+	private static bool IsSubCommand(string value) => value.Equals(SubCommandStatus, StringComparison.OrdinalIgnoreCase) || value.Equals(SubCommandCancel, StringComparison.OrdinalIgnoreCase) || value.Equals(SubCommandStop, StringComparison.OrdinalIgnoreCase);
+
 	private async Task<string> Start(Bot bot, HashSet<uint> gameIDs, string? gameName, float minutes) {
 		string description = DescribeGames(gameIDs, gameName);
 
@@ -302,6 +306,7 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 			return Format(bot, $"{Command}: no active timer to stop.");
 		}
 
+		session.MarkStopped();
 		session.Cancel();
 		_ = StopAsync(bot, session);
 
@@ -320,8 +325,15 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 			return;
 		}
 
-		Sessions.TryRemove(bot.BotName, out _);
+		if (Sessions.TryGetValue(bot.BotName, out Session? current) && (current == session)) {
+			Sessions.TryRemove(bot.BotName, out _);
+		} else {
+			session.Cancel();
 
+			return;
+		}
+
+		session.MarkStopped();
 		session.Cancel();
 
 		_ = StopAsync(bot, session);
@@ -351,7 +363,11 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 		return false;
 	}
 
-	private static async Task Reassert(Bot bot, Session session) {
+	private async Task Reassert(Bot bot, Session session) {
+		if (!session.IsActive) {
+			return;
+		}
+
 		try {
 			// Re-asserting the games necessarily re-pauses the cards farmer, which is the point: a `playfor` session
 			// owns the bot until its deadline, so a stray `resume` does not survive the next heartbeat. `cancel` is
@@ -364,6 +380,12 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 		}
 		catch (Exception e) {
 			bot.ArchiLogger.LogGenericException(e);
+		}
+
+		// If this session was stopped while the Play call was in flight, and no new session took over,
+		// ensure games are cleared so the bot does not keep playing indefinitely.
+		if (!session.IsActive && session.WasStopped && !TryGetActiveSession(bot, out _)) {
+			_ = bot.Actions.Play([]);
 		}
 	}
 
@@ -419,6 +441,22 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 		return uint.TryParse(trimmed, out appID) && (appID > 0);
 	}
 
+	private static bool IsAppIdList(string text) {
+		string[] tokens = text.Split(SharedInfo.ListElementSeparators, StringSplitOptions.RemoveEmptyEntries);
+
+		if (tokens.Length == 0) {
+			return false;
+		}
+
+		foreach (string token in tokens) {
+			if (!TryParseAppId(token, out _)) {
+				return false;
+			}
+		}
+
+		return true;
+	}
+
 	private static string DescribeGames(IEnumerable<uint> gameIDs, string? gameName) {
 		string ids = string.Join("+", gameIDs.Select(static gameID => gameID.ToString(CultureInfo.InvariantCulture)));
 
@@ -461,6 +499,10 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 
 		/// <summary>Whether the cards farmer was already paused before this session started.</summary>
 		internal bool WasCardsPaused => _wasCardsPaused;
+
+		internal bool WasStopped { get; private set; }
+
+		internal void MarkStopped() => WasStopped = true;
 
 		internal uint[] GameIDs { get; }
 

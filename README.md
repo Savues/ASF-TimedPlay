@@ -15,7 +15,7 @@ ASF 原生只有 `pause& <秒>`(到点自动恢复)和 `play`(手动模式,会�
 **3.** 重启 ASF,日志出现这两行就成功了
 
 ```
-InitPlugins() 正在加载 TimedPlayPlugin V1.1.1.0……
+InitPlugins() 正在加载 TimedPlayPlugin V1.6.0.0……
 InitPlugins() TimedPlayPlugin 加载成功！
 ```
 
@@ -64,6 +64,7 @@ SteamTokenDumperPlugin 服务端有 5 分钟提交限流,高频触发是安全�
 ### 例子
 
 ```
+!f                                      查看命令帮助
 !f 730                                  CS2 挂 35 分钟(默认时长)
 !f 730 30                               CS2 挂 30 分钟
 !playfor 730 0.5                        挂 30 秒(适合测试)
@@ -273,7 +274,7 @@ cd ASF-TimedPlay
 发布 Release 用 `release.ps1`,它全程走 GitHub REST API,**不需要 `git push`**(Git 的 smart-HTTP 传输在某些网络下会被拦或超时):
 
 ```powershell
-.\release.ps1 -Version 1.4.0
+.\release.ps1 -Version 1.6.0
 ```
 
 脚本依次做这几件事:把 `-Version` 写进 `TimedPlay.csproj` → 构建 → 打包 `TimedPlay.zip`(内含 `plugins/TimedPlay/TimedPlay.dll`、`LICENSE`、`README.md`)→ 通过 API 把当前工作树镜像成远端默认分支上的一个提交 → 打 tag → 建 Release 并上传附件。远端分支始终等于当前工作树,不依赖本地提交历史。
@@ -281,7 +282,7 @@ cd ASF-TimedPlay
 Token 的取值顺序是 `-Token` 参数 → `$env:GITHUB_TOKEN` → git 为 github.com 保存的凭据。
 
 ```powershell
-.\release.ps1 -Version 1.4.1 -SkipBuild   # 复用 bin 里已有的 DLL,不重新构建
+.\release.ps1 -Version 1.6.0 -SkipBuild   # 复用 bin 里已有的 DLL,不重新构建
 ```
 
 CI(`.github/workflows/ci.yml`)只在 `main` 与 PR 上跑构建和裁剪检查,不再负责发布。
