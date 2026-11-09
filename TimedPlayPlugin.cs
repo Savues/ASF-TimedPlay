@@ -616,9 +616,14 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 				}
 
 				List<uint> cancelled = [];
+				List<uint> alreadyDetached = [];
 				List<uint> notFound = [];
 
 				if ((appIDs == null) || (appIDs.Count == 0)) {
+					if (_tasks.IsEmpty) {
+						return Format(_bot, $"{Command}: no active timers to cancel (all running games are already detached).");
+					}
+
 					cancelled = [.. _tasks.Keys];
 
 					foreach (uint id in cancelled) {
@@ -636,7 +641,7 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 							_detachedGames[id] = 0;
 							cancelled.Add(id);
 						} else if (_detachedGames.ContainsKey(id)) {
-							cancelled.Add(id);
+							alreadyDetached.Add(id);
 						} else {
 							notFound.Add(id);
 						}
@@ -651,6 +656,10 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 
 				if (cancelled.Count > 0) {
 					parts.Add($"timers for {DescribeGames(cancelled)} cancelled, games keep running on Steam");
+				}
+
+				if (alreadyDetached.Count > 0) {
+					parts.Add($"game(s) {DescribeGames(alreadyDetached)} already detached");
 				}
 
 				if (notFound.Count > 0) {
