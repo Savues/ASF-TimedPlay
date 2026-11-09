@@ -15,7 +15,7 @@ ASF 原生只有 `pause& <秒>`(到点自动恢复)和 `play`(手动模式,会�
 **3.** 重启 ASF,日志出现这两行就成功了
 
 ```
-InitPlugins() 正在加载 TimedPlayPlugin V1.7.0.0……
+InitPlugins() 正在加载 TimedPlayPlugin V1.7.1.0……
 InitPlugins() TimedPlayPlugin 加载成功！
 ```
 
@@ -273,8 +273,8 @@ cd ASF-TimedPlay
 打 tag 即可触发 CI 自动构建并发布 Release:
 
 ```bash
-git tag v1.7.0
-git push origin v1.7.0
+git tag v1.7.1
+git push origin v1.7.1
 ```
 
 CI 会用 tag 的版本号自动设置程序集版本，执行完整裁剪检查，自动打包 `TimedPlay.zip` 并发布到 GitHub Releases。

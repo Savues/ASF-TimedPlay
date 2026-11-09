@@ -414,6 +414,7 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 		private readonly Bot _bot;
 		private readonly SemaphoreSlim _lock = new(1, 1);
 		private readonly ConcurrentDictionary<uint, GameTask> _tasks = new();
+		private readonly ConcurrentDictionary<uint, byte> _detachedGames = new();
 		private Timer? _heartbeatTimer;
 		private DateTime _nextHeartbeat;
 		private bool _initialCardsPaused;
@@ -423,7 +424,17 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 			_bot = bot;
 		}
 
-		internal bool HasActiveTasks => !_tasks.IsEmpty;
+		private HashSet<uint> GetAllActiveGameIDs() {
+			HashSet<uint> all = new(_tasks.Keys);
+
+			foreach (uint id in _detachedGames.Keys) {
+				all.Add(id);
+			}
+
+			return all;
+		}
+
+		internal bool HasActiveTasks => !_tasks.IsEmpty || !_detachedGames.IsEmpty;
 
 		internal async Task<string> AddOrUpdateGamesAsync(HashSet<uint> gameIDs, TimeSpan duration) {
 			await _lock.WaitAsync().ConfigureAwait(false);
@@ -433,7 +444,7 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 					return Format(_bot, $"{Command}: bot is not connected / logged on.");
 				}
 
-				HashSet<uint> plannedKeys = new(_tasks.Keys);
+				HashSet<uint> plannedKeys = GetAllActiveGameIDs();
 
 				foreach (uint id in gameIDs) {
 					plannedKeys.Add(id);
@@ -443,7 +454,7 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 					return Format(_bot, $"{Command}: adding {gameIDs.Count} game(s) would result in {plannedKeys.Count} concurrent games, exceeding the limit of {MaxGamesPlayedConcurrently}.");
 				}
 
-				if (_tasks.IsEmpty) {
+				if (_tasks.IsEmpty && _detachedGames.IsEmpty) {
 					_initialCardsPaused = _bot.CardsFarmer.Paused;
 				}
 
@@ -451,11 +462,11 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 				(bool success, string message) = await _bot.Actions.Play(playArray).ConfigureAwait(false);
 
 				if (!success) {
-					if (_tasks.IsEmpty) {
+					if (_tasks.IsEmpty && _detachedGames.IsEmpty) {
 						return Format(_bot, $"{Command}: failed to play {DescribeGames(gameIDs)} - {message}");
 					}
 
-					_ = await _bot.Actions.Play([.. _tasks.Keys]).ConfigureAwait(false);
+					_ = await _bot.Actions.Play([.. GetAllActiveGameIDs()]).ConfigureAwait(false);
 
 					return Format(_bot, $"{Command}: failed to play {DescribeGames(gameIDs)} - {message}");
 				}
@@ -463,6 +474,8 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 				DateTime dueAt = DateTime.UtcNow + duration;
 
 				foreach (uint id in gameIDs) {
+					_detachedGames.TryRemove(id, out _);
+
 					if (_tasks.TryRemove(id, out GameTask? existing)) {
 						existing.Dispose();
 					}
@@ -474,9 +487,9 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 
 				EnsureHeartbeatRunning();
 
-				_bot.ArchiLogger.LogGenericInfo($"{Command}: {DescribeGames(gameIDs)} started/updated on {_bot.BotName}, running for {FormatDuration(duration)} (total active: {_tasks.Count}).");
+				_bot.ArchiLogger.LogGenericInfo($"{Command}: {DescribeGames(gameIDs)} started/updated on {_bot.BotName}, running for {FormatDuration(duration)} (total active: {plannedKeys.Count}).");
 
-				return Format(_bot, $"started/updated {DescribeGames(gameIDs)} - will run for {FormatDuration(duration)} (active: {_tasks.Count}/{MaxGamesPlayedConcurrently})");
+				return Format(_bot, $"started/updated {DescribeGames(gameIDs)} - will run for {FormatDuration(duration)} (active: {plannedKeys.Count}/{MaxGamesPlayedConcurrently})");
 			}
 			catch (Exception e) {
 				_bot.ArchiLogger.LogGenericException(e);
@@ -501,7 +514,7 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 				_bot.ArchiLogger.LogGenericInfo($"{Command}: game {appID} timer expired on {_bot.BotName}.");
 
 				if (!_tasks.IsEmpty) {
-					uint[] remainingIds = [.. _tasks.Keys];
+					uint[] remainingIds = [.. GetAllActiveGameIDs()];
 					(bool success, string message) = await _bot.Actions.Play(remainingIds).ConfigureAwait(false);
 
 					if (!success) {
@@ -509,7 +522,19 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 					}
 				} else {
 					StopHeartbeat();
-					await StopAllGamesAndRestoreFarmingAsync().ConfigureAwait(false);
+
+					if (!_detachedGames.IsEmpty) {
+						uint[] detachedIds = [.. _detachedGames.Keys];
+						(bool success, string message) = await _bot.Actions.Play(detachedIds).ConfigureAwait(false);
+
+						if (!success) {
+							_bot.ArchiLogger.LogGenericWarning($"{Command}: failed to reconcile detached games on {_bot.BotName} after timed games ended - {message}");
+						}
+
+						_bot.ArchiLogger.LogGenericInfo($"{Command}: all timed games finished on {_bot.BotName}; detached games ({DescribeGames(detachedIds)}) keep running on Steam.");
+					} else {
+						await StopAllGamesAndRestoreFarmingAsync().ConfigureAwait(false);
+					}
 				}
 			}
 			catch (Exception e) {
@@ -533,8 +558,8 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 				_nextHeartbeat = DateTime.UtcNow + HeartbeatInterval;
 
 				if (_bot.IsConnectedAndLoggedOn) {
-					uint[] activeIds = [.. _tasks.Keys];
-					_bot.ArchiLogger.LogGenericInfo($"{Command}: heartbeat - {_tasks.Count} game(s) active on {_bot.BotName} ({DescribeGames(activeIds)}).");
+					uint[] activeIds = [.. GetAllActiveGameIDs()];
+					_bot.ArchiLogger.LogGenericInfo($"{Command}: heartbeat - {_tasks.Count} timed + {_detachedGames.Count} detached game(s) active on {_bot.BotName} ({DescribeGames(activeIds)}).");
 
 					(bool success, string message) = await _bot.Actions.Play(activeIds).ConfigureAwait(false);
 
@@ -542,7 +567,7 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 						_bot.ArchiLogger.LogGenericWarning($"{Command}: heartbeat failed to re-assert games on {_bot.BotName} - {message}");
 					}
 				} else {
-					_bot.ArchiLogger.LogGenericWarning($"{Command}: heartbeat - {_tasks.Count} game(s) active on {_bot.BotName} but bot is offline.");
+					_bot.ArchiLogger.LogGenericWarning($"{Command}: heartbeat - {GetAllActiveGameIDs().Count} game(s) active on {_bot.BotName} but bot is offline.");
 				}
 			}
 			catch (Exception e) {
@@ -557,13 +582,15 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 			await _lock.WaitAsync().ConfigureAwait(false);
 
 			try {
-				if (_tasks.IsEmpty) {
+				HashSet<uint> allActive = GetAllActiveGameIDs();
+
+				if (allActive.Count == 0) {
 					return;
 				}
 
 				if (_bot.IsConnectedAndLoggedOn) {
-					uint[] activeIds = [.. _tasks.Keys];
-					_bot.ArchiLogger.LogGenericInfo($"{Command}: bot {_bot.BotName} logged on, re-asserting {_tasks.Count} game(s) ({DescribeGames(activeIds)}).");
+					uint[] activeIds = [.. allActive];
+					_bot.ArchiLogger.LogGenericInfo($"{Command}: bot {_bot.BotName} logged on, re-asserting {activeIds.Length} game(s) ({DescribeGames(activeIds)}).");
 
 					(bool success, string message) = await _bot.Actions.Play(activeIds).ConfigureAwait(false);
 
@@ -584,38 +611,40 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 			await _lock.WaitAsync().ConfigureAwait(false);
 
 			try {
-				if (_tasks.IsEmpty) {
+				if (_tasks.IsEmpty && _detachedGames.IsEmpty) {
 					return Format(_bot, $"{Command}: no active timers to cancel.");
-				}
-
-				if ((appIDs == null) || (appIDs.Count == 0)) {
-					List<uint> cancelledAll = [.. _tasks.Keys];
-
-					foreach (uint id in cancelledAll) {
-						if (_tasks.TryRemove(id, out GameTask? task)) {
-							task.Dispose();
-						}
-					}
-
-					StopHeartbeat();
-
-					return Format(_bot, $"{Command}: timers for {DescribeGames(cancelledAll)} cancelled, games keep running on Steam.");
 				}
 
 				List<uint> cancelled = [];
 				List<uint> notFound = [];
 
-				foreach (uint id in appIDs) {
-					if (_tasks.TryRemove(id, out GameTask? task)) {
-						task.Dispose();
-						cancelled.Add(id);
-					} else {
-						notFound.Add(id);
-					}
-				}
+				if ((appIDs == null) || (appIDs.Count == 0)) {
+					cancelled = [.. _tasks.Keys];
 
-				if (_tasks.IsEmpty) {
+					foreach (uint id in cancelled) {
+						if (_tasks.TryRemove(id, out GameTask? task)) {
+							task.Dispose();
+							_detachedGames[id] = 0;
+						}
+					}
+
 					StopHeartbeat();
+				} else {
+					foreach (uint id in appIDs) {
+						if (_tasks.TryRemove(id, out GameTask? task)) {
+							task.Dispose();
+							_detachedGames[id] = 0;
+							cancelled.Add(id);
+						} else if (_detachedGames.ContainsKey(id)) {
+							cancelled.Add(id);
+						} else {
+							notFound.Add(id);
+						}
+					}
+
+					if (_tasks.IsEmpty) {
+						StopHeartbeat();
+					}
 				}
 
 				List<string> parts = [];
@@ -639,58 +668,69 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 			await _lock.WaitAsync().ConfigureAwait(false);
 
 			try {
-				if (_tasks.IsEmpty) {
+				if (_tasks.IsEmpty && _detachedGames.IsEmpty) {
 					return Format(_bot, $"{Command}: no active games to stop.");
-				}
-
-				if ((appIDs == null) || (appIDs.Count == 0)) {
-					List<uint> stoppedAll = [.. _tasks.Keys];
-
-					foreach (uint id in stoppedAll) {
-						if (_tasks.TryRemove(id, out GameTask? task)) {
-							task.Dispose();
-						}
-					}
-
-					StopHeartbeat();
-					await StopAllGamesAndRestoreFarmingAsync().ConfigureAwait(false);
-
-					return Format(_bot, $"{Command}: stopped all games ({DescribeGames(stoppedAll)}), cards farming state restored.");
 				}
 
 				List<uint> stopped = [];
 				List<uint> notFound = [];
 
-				foreach (uint id in appIDs) {
-					if (_tasks.TryRemove(id, out GameTask? task)) {
-						task.Dispose();
-						stopped.Add(id);
-					} else {
-						notFound.Add(id);
+				if ((appIDs == null) || (appIDs.Count == 0)) {
+					stopped = [.. GetAllActiveGameIDs()];
+
+					foreach (uint id in _tasks.Keys) {
+						if (_tasks.TryRemove(id, out GameTask? task)) {
+							task.Dispose();
+						}
+					}
+
+					_detachedGames.Clear();
+				} else {
+					foreach (uint id in appIDs) {
+						bool found = false;
+
+						if (_tasks.TryRemove(id, out GameTask? task)) {
+							task.Dispose();
+							found = true;
+						}
+
+						if (_detachedGames.TryRemove(id, out _)) {
+							found = true;
+						}
+
+						if (found) {
+							stopped.Add(id);
+						} else {
+							notFound.Add(id);
+						}
 					}
 				}
 
-				if (stopped.Count > 0) {
+				HashSet<uint> remaining = GetAllActiveGameIDs();
+
+				if (remaining.Count > 0) {
 					if (_tasks.IsEmpty) {
 						StopHeartbeat();
-						await StopAllGamesAndRestoreFarmingAsync().ConfigureAwait(false);
-					} else {
-						uint[] remainingIds = [.. _tasks.Keys];
-						(bool success, string message) = await _bot.Actions.Play(remainingIds).ConfigureAwait(false);
-
-						if (!success) {
-							_bot.ArchiLogger.LogGenericWarning($"{Command}: failed to reconcile games on {_bot.BotName} after stopping {DescribeGames(stopped)} - {message}");
-						}
 					}
+
+					uint[] remainingIds = [.. remaining];
+					(bool success, string message) = await _bot.Actions.Play(remainingIds).ConfigureAwait(false);
+
+					if (!success) {
+						_bot.ArchiLogger.LogGenericWarning($"{Command}: failed to reconcile games on {_bot.BotName} after stopping {DescribeGames(stopped)} - {message}");
+					}
+				} else {
+					StopHeartbeat();
+					await StopAllGamesAndRestoreFarmingAsync().ConfigureAwait(false);
 				}
 
 				List<string> parts = [];
 
 				if (stopped.Count > 0) {
-					if (_tasks.IsEmpty) {
+					if (remaining.Count == 0) {
 						parts.Add($"stopped {DescribeGames(stopped)}, all games stopped, cards farming state restored");
 					} else {
-						parts.Add($"stopped {DescribeGames(stopped)}, remaining active games: {DescribeGames(_tasks.Keys)}");
+						parts.Add($"stopped {DescribeGames(stopped)}, remaining active games: {DescribeGames(remaining)}");
 					}
 				}
 
@@ -707,8 +747,9 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 
 		internal string GetStatus() {
 			List<GameTask> tasks = _tasks.Values.OrderBy(static t => t.DueAt).ToList();
+			List<uint> detached = [.. _detachedGames.Keys];
 
-			if (tasks.Count == 0) {
+			if ((tasks.Count == 0) && (detached.Count == 0)) {
 				return Format(_bot, $"{Command}: no active timers.");
 			}
 
@@ -718,18 +759,28 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 				heartbeatIn = TimeSpan.Zero;
 			}
 
-			if (tasks.Count == 1) {
+			string heartbeatText = (tasks.Count > 0) ? $", heartbeat in {FormatDuration(heartbeatIn)}" : "";
+
+			if ((tasks.Count == 1) && (detached.Count == 0)) {
 				GameTask t = tasks[0];
 
-				return Format(_bot, $"{Command}: {t.AppID} -> stopping in {FormatDuration(t.Remaining)} ({t.DueAt:yyyy-MM-dd HH:mm:ss} UTC), heartbeat in {FormatDuration(heartbeatIn)}");
+				return Format(_bot, $"{Command}: {t.AppID} -> stopping in {FormatDuration(t.Remaining)} ({t.DueAt:yyyy-MM-dd HH:mm:ss} UTC){heartbeatText}");
+			}
+
+			if ((tasks.Count == 0) && (detached.Count == 1)) {
+				return Format(_bot, $"{Command}: {detached[0]} -> detached (running on Steam without timer)");
 			}
 
 			List<string> lines = [
-				Format(_bot, $"{Command}: {tasks.Count} active game(s), heartbeat in {FormatDuration(heartbeatIn)}:")
+				Format(_bot, $"{Command}: {tasks.Count} timed game(s), {detached.Count} detached game(s){heartbeatText}:")
 			];
 
 			foreach (GameTask t in tasks) {
 				lines.Add($"  - AppID {t.AppID} -> stopping in {FormatDuration(t.Remaining)} ({t.DueAt:yyyy-MM-dd HH:mm:ss} UTC)");
+			}
+
+			foreach (uint id in detached) {
+				lines.Add($"  - AppID {id} -> detached (running on Steam without timer)");
 			}
 
 			return string.Join(Environment.NewLine, (IEnumerable<string>) lines);
@@ -779,6 +830,8 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 					task.Dispose();
 				}
 			}
+
+			_detachedGames.Clear();
 
 			_lock.Dispose();
 		}

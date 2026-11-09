@@ -26,7 +26,7 @@ jobs:
 
       - name: Build
         shell: pwsh
-        run: ./build.ps1
+        run: ./build.ps1 -AsfVersion 6.3.10.3
 
       # ASF's Windows release is a trimmed single-file build: ILLink drops every BCL member ASF itself never
       # calls, so a plugin that touches one compiles fine and only throws MissingMethodException at runtime.
