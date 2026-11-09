@@ -2,7 +2,7 @@
 
 给 [ArchiSteamFarm](https://github.com/JustArchiNET/ArchiSteamFarm) 加一条 `playfor` 命令:**启动指定游戏,挂满指定时长后自动停掉。**
 
-ASF 原生只有 `pause& <秒>`(到点自动恢复)和 `play`(手动模式,会被各种情况打断),没有"挂满 N 分钟就停住"的语义。这个插件补上这块,并且解决了 `play` 在真实环境里几乎必然被打断的两个问题(见下文「稳定性设计」)。
+ASF 原生只有 `pause& <秒>`(到点自动恢复)和 `play`(手动模式,会被各种情况打断),没有"挂满 N 分钟就停住"的语义。这个插件补上这块,支持**多游戏并发挂机与各自独立倒计时**,并且解决了 `play` 在真实环境里几乎必然被打断的两个问题(见下文「稳定性设计」)。
 
 ---
 
@@ -15,7 +15,7 @@ ASF 原生只有 `pause& <秒>`(到点自动恢复)和 `play`(手动模式,会�
 **3.** 重启 ASF,日志出现这两行就成功了
 
 ```
-InitPlugins() 正在加载 TimedPlayPlugin V1.6.2.0……
+InitPlugins() 正在加载 TimedPlayPlugin V1.7.0.0……
 InitPlugins() TimedPlayPlugin 加载成功！
 ```
 
@@ -28,10 +28,10 @@ InitPlugins() TimedPlayPlugin 加载成功！
 ## 命令
 
 ```
-playfor|f [Bots] <AppIDs> [Minutes] [GameName]  启动游戏,Minutes 分钟后自动停止(省略则 35 分钟)
-playfor|f [Bots] status                         查看剩余时间与心跳状态
-playfor|f [Bots] cancel                         取消计时(游戏继续跑)
-playfor|f [Bots] stop                           立即停止游戏并恢复挂卡状态
+playfor|f [Bots] <AppIDs> [Minutes]             启动/追加游戏,Minutes 分钟后自动停止(省略则 35 分钟)
+playfor|f [Bots] status                         查看当前所有并发游戏的剩余倒计时与心跳状态
+playfor|f [Bots] cancel [AppIDs]                脱管定时器(指定或全部游戏继续在 Steam 运行,不再自动停止)
+playfor|f [Bots] stop [AppIDs]                  停止指定或全部游戏并在 Steam 上更新移除,恢复挂卡状态
 ```
 
 `f` 是 `playfor` 的单字母别名,两者完全等价。
@@ -39,19 +39,17 @@ playfor|f [Bots] stop                           立即停止游戏并恢复挂�
 | 参数 | 说明 |
 |---|---|
 | `[Bots]` | 可选。支持 `@all` / `@farming` / `@idle`、`A..C` 区间、正则,与 ASF 内置命令完全一致。省略则作用于发出命令的 bot |
-| `<AppIDs>` | 支持 `730`、`app/730`、`a/730`,多个用逗号分隔,最多 32 个(Steam 网络硬限制) |
+| `<AppIDs>` | 支持 `730`、`app/730`、`a/730`,多个用逗号分隔。与当前已有游戏合并计算,上限 32 个(Steam 网络硬限制) |
 | `[Minutes]` | 可选,省略即 **35 分钟**。支持小数,`0.5` = 30 秒,`1800` = 30 小时。上限 43000 分钟(约 29.8 天) |
-| `[GameName]` | 可选,作为 Steam 好友看到的状态文字 |
 
-因为时长可省略,`[Minutes]` 和 `[GameName]` 之间靠类型区分:**紧跟 AppIDs 的第一个 token 如果能解析成数字,就是时长,否则就是游戏名的开头。**
+### 多游戏并发挂机 (独立倒计时)
 
-```
-!f 730                        → 730,挂 35 分钟
-!f 730 Hollow Knight          → 730,挂 35 分钟,显示名 "Hollow Knight"
-!f 730 35 Hollow Knight       → 730,挂 35 分钟,显示名 "Hollow Knight"
-```
-
-代价是:**游戏名以数字开头时必须把时长写出来**,例如 `!f 730 35 2 Fast 2 Furious`。同理,把时长手滑写成非数字会被当成游戏名,然后按默认 35 分钟跑。
+- **支持多任务并发执行**:如果在游戏 A 还在挂机时再次执行 `!f 570 30`,插件**不会覆盖**游戏 A,而是让两者同时在 Steam 上运行,每个游戏保留独立的到期倒计时。
+- **平滑缩容**:当其中一个游戏倒计时归零时,仅从 Steam 移除该游戏,其余未到期游戏继续保持挂机;直到最后一个游戏到期时,才完整清空挂机列表并恢复挂卡。
+- **刷新定时**:若追加的游戏已在运行列表中,则平滑重置/刷新该游戏的挂机时长。
+- **精准停止/脱管**:
+  - `!f cancel 730`:脱管 730 的定时器(游戏继续跑,不再自动停止);省略 AppID 则脱管全部。
+  - `!f stop 730`:立即从 Steam 停止 730,其余游戏继续挂;省略 AppID 则停止全部并恢复挂卡。
 
 Steam 聊天需加 `!` 前缀;IPC 模式不需要。
 
@@ -66,16 +64,17 @@ SteamTokenDumperPlugin 服务端有 5 分钟提交限流,高频触发是安全�
 ```
 !f                                      查看命令帮助
 !f 730                                  CS2 挂 35 分钟(默认时长)
-!f 730 30                               CS2 挂 30 分钟
+!f 730 60                               CS2 挂 60 分钟
+!f 570 30                               追加 Dota 2 挂 30 分钟(与 CS2 并发运行,各自独立计时)
 !playfor 730 0.5                        挂 30 秒(适合测试)
-!f app/730,440 45                       两个游戏并行挂 45 分钟
-!f app/730 30 Counter-Strike            带自定义显示名
-!f 730 Hollow Knight                    默认 35 分钟 + 显示名
+!f app/730,440 45                       同时启动两个游戏挂 45 分钟
 !playfor @all app/730 30                所有 bot 同时挂
 !playfor A..C app/730 30                区间
-!f status                               查剩余时间
-!f cancel                               撤销计时,游戏不停
-!f stop                                 立即停止游戏,恢复挂卡
+!f status                               查当前并发游戏的各自剩余时间
+!f cancel 730                           脱管 730 的定时器,游戏继续在 Steam 跑
+!f cancel                               脱管当前 bot 全部游戏的定时器
+!f stop 730                             立即停掉 730,其余游戏继续挂
+!f stop                                 立即停止当前 bot 的全部游戏,恢复挂卡
 ```
 
 ---
@@ -109,7 +108,7 @@ System.MissingMethodException: Attempted to access a missing method.
 | `uint.TryParse(s, NumberStyles, CultureInfo, out uint)` —— ASF 只用 2 参数版 | `uint.TryParse(s, out v)` |
 | `string.Join('+', xs)` char 分隔符 | `string.Join("+", xs)` |
 | `Interlocked.Exchange<T>()` | 普通赋值(`Timer.Dispose()` 本身是幂等的) |
-| `ReferenceEquals(a, b)` | 用现有的 `IsActive` 状态判断 |
+| `ReferenceEquals(a, b)` | 用现有的状态判断 |
 | `string.Join(string, params string[])` —— 例如 `string.Join(" ", 某个 string[])` | 强制走存活的 `IEnumerable<string>` 重载:`string.Join(" ", (IEnumerable<string>) arr)`,或先塞进 `List<string>` |
 | `array[start..]`(带**显式起点**的切片) —— 编译成 `System.Range.StartAt` | `Substring(start)` / `Substring(start, length)` |
 
@@ -203,17 +202,17 @@ playfor: 4235370 finished on Savues but pausing failed - 已經暫停自動掛�
 
 **1. 心跳(每 2 分钟)**
 
-定时重新补发游戏列表,被 `CheckOccupationStatus()` 清掉就自动挂回去。
+定时重新补发当前所有存活游戏列表,被 `CheckOccupationStatus()` 清掉就自动挂回去。
 
 **2. 断线重连自动恢复**
 
-实现 `IBotConnection`,在 `OnBotLoggedOn` 时立即恢复挂载。断线频繁的环境下这条是刚需。
+实现 `IBotConnection`,在 `OnBotLoggedOn` 时立即恢复当前所有挂载游戏。断线频繁的环境下这条是刚需。
 
 **3. 挂卡状态原样还给你**
 
 这是插件唯一允许自己**暂时**改变挂卡的理由:用户主动让 bot 挂游戏,账号被 Steam 判定为「占用中」,挂卡必然要暂停,这是绕不开的。
 
-除此之外插件不再改动挂卡。做法是会话开始时记下 `bot.CardsFarmer.Paused`,到点停完游戏后:
+除此之外插件不再改动挂卡。做法是在并发会话从 0 款游戏进入挂机时记下初始 `bot.CardsFarmer.Paused`(后续并发追加游戏不覆写)。直到全部并发游戏均到点停完后:
 
 - 会话前**没**暂停 → 调 `Actions.Resume()`。这一步是必须的,因为 `Actions.Play()` 会设 `PermanentlyPaused`,而 ASF 自己的自动恢复(`CheckOccupationStatus` → `Resume(false)`)碰到永久暂停会直接拒绝,挂卡就再也回不来了。
 - 会话前**已经**暂停(你自己 `pause` 过)→ 什么都不做,保持暂停。
@@ -222,9 +221,9 @@ playfor: 4235370 finished on Savues but pausing failed - 已經暫停自動掛�
 
 ```
 # 会话前未暂停
-playfor: 4235370 finished on Savues, games stopped, cards farming 已繼續自動掛卡！
+playfor: all games finished on Savues, games stopped, cards farming 已繼續自動掛卡！
 # 会话前已暂停
-playfor: 4235370 finished on Savues, games stopped, cards farming left paused as it was
+playfor: all games finished on Savues, games stopped, cards farming left paused as it was
 ```
 
 **会话期间 `resume` 会被覆盖**:心跳调用 `Actions.Play()`,会重新暂停挂卡。也就是说 `playfor` 会话期间 bot 归插件管,直到计时结束。想提前交还控制权用 `playfor cancel`(注意 `cancel` **不会**停游戏,游戏继续跑,挂卡也就继续保持暂停)。
@@ -274,8 +273,8 @@ cd ASF-TimedPlay
 打 tag 即可触发 CI 自动构建并发布 Release:
 
 ```bash
-git tag v1.6.2
-git push origin v1.6.2
+git tag v1.7.0
+git push origin v1.7.0
 ```
 
 CI 会用 tag 的版本号自动设置程序集版本，执行完整裁剪检查，自动打包 `TimedPlay.zip` 并发布到 GitHub Releases。

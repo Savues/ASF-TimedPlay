@@ -2,7 +2,6 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Composition;
-using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Linq;
 using System.Text.Json.Serialization;
@@ -17,7 +16,8 @@ namespace TimedPlay;
 
 /// <summary>
 ///     Adds a <c>playfor</c> command - also reachable as the one-letter <c>f</c> - that launches one or more games
-///     and, after a configured amount of time, stops cards farming so the game is no longer "being played".
+///     and, after a configured amount of time, stops them so cards farming can resume.
+///     Supports concurrent execution of multiple games with independent timers.
 /// </summary>
 /// <remarks>
 ///     Two things routinely kill a plain <c>play</c> session, and both are handled here:
@@ -64,9 +64,9 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 	/// </summary>
 	private static readonly TimeSpan HeartbeatInterval = TimeSpan.FromMinutes(2);
 
-	private const string Usage = $"{Command}|{CommandShort} [Bots] <AppIDs> [Minutes] [GameName] | {Command}|{CommandShort} [Bots] {SubCommandStatus} | {Command}|{CommandShort} [Bots] {SubCommandCancel} | {Command}|{CommandShort} [Bots] {SubCommandStop}";
+	private const string Usage = $"{Command}|{CommandShort} [Bots] <AppIDs> [Minutes] | {Command}|{CommandShort} [Bots] {SubCommandStatus} | {Command}|{CommandShort} [Bots] {SubCommandCancel} [AppIDs] | {Command}|{CommandShort} [Bots] {SubCommandStop} [AppIDs]";
 
-	private readonly ConcurrentDictionary<string, Session> Sessions = new(StringComparer.OrdinalIgnoreCase);
+	private readonly ConcurrentDictionary<string, BotSession> Sessions = new(StringComparer.OrdinalIgnoreCase);
 
 	/// <summary>Timer for periodic std command execution.</summary>
 	private Timer? _stdDumpTimer;
@@ -86,7 +86,9 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 	public Task OnBotInit(Bot bot) => Task.CompletedTask;
 
 	public Task OnBotDestroy(Bot bot) {
-		Abort(bot);
+		if (Sessions.TryRemove(bot.BotName, out BotSession? session)) {
+			session.Dispose();
+		}
 
 		return Task.CompletedTask;
 	}
@@ -112,17 +114,17 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 	}
 
 	public Task OnBotLoggedOn(Bot bot) {
-		// A reconnect wipes whatever ASF was playing, so restore it immediately instead of waiting for the heartbeat.
-		if (TryGetActiveSession(bot, out Session? session)) {
-			_ = Reassert(bot, session);
+		// A reconnect wipes whatever ASF was playing, so restore active games immediately instead of waiting for heartbeat.
+		if (Sessions.TryGetValue(bot.BotName, out BotSession? session) && session.HasActiveTasks) {
+			_ = session.ReassertAsync();
 		}
 
 		return Task.CompletedTask;
 	}
 
 	public Task OnBotDisconnected(Bot bot, EResult reason) {
-		if (TryGetActiveSession(bot, out Session? session)) {
-			bot.ArchiLogger.LogGenericWarning($"{Command}: {session.Describe()} was interrupted by a Steam disconnect ({reason}); it will be restored on reconnect.");
+		if (Sessions.TryGetValue(bot.BotName, out BotSession? session) && session.HasActiveTasks) {
+			bot.ArchiLogger.LogGenericWarning($"{Command}: active games on {bot.BotName} were interrupted by a Steam disconnect ({reason}); they will be restored on reconnect.");
 		}
 
 		return Task.CompletedTask;
@@ -147,6 +149,10 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 		// 2. Otherwise, treat args[1] as a bot list.
 		HashSet<Bot>? targets = (IsSubCommand(args[1]) || IsAppIdList(args[1])) ? null : Bot.GetBots(args[1]);
 
+		if (targets != null && targets.Count == 0) {
+			return Format(bot, $"{Command}: no bots matched `{args[1]}`.");
+		}
+
 		int index = (targets != null) ? 2 : 1;
 		Bot[] orderedTargets = (targets ?? [bot]).OrderBy(static target => target.BotName, StringComparer.OrdinalIgnoreCase).ToArray();
 
@@ -157,7 +163,11 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 		string subCommand = args[index];
 
 		if (subCommand.Equals(SubCommandStatus, StringComparison.OrdinalIgnoreCase)) {
-			return string.Join(Environment.NewLine, orderedTargets.Select(GetStatus));
+			if ((index + 1) < args.Length) {
+				return FormatUsage(orderedTargets);
+			}
+
+			return string.Join(Environment.NewLine, (IEnumerable<string>) orderedTargets.Select(GetStatus));
 		}
 
 		if (subCommand.Equals(SubCommandCancel, StringComparison.OrdinalIgnoreCase)) {
@@ -165,7 +175,33 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 				return null;
 			}
 
-			return string.Join(Environment.NewLine, orderedTargets.Select(Cancel));
+			HashSet<uint>? cancelIDs = null;
+
+			if ((index + 1) < args.Length) {
+				if ((index + 2) < args.Length) {
+					return FormatUsage(orderedTargets);
+				}
+
+				string[] tokens = args[index + 1].Split(SharedInfo.ListElementSeparators, StringSplitOptions.RemoveEmptyEntries);
+
+				if (tokens.Length == 0) {
+					return FormatAll(orderedTargets, $"{Command}: no AppIDs given to cancel.");
+				}
+
+				cancelIDs = [];
+
+				foreach (string token in tokens) {
+					if (!TryParseAppId(token, out uint appID)) {
+						return FormatAll(orderedTargets, $"{Command}: invalid AppID `{token}`.");
+					}
+
+					cancelIDs.Add(appID);
+				}
+			}
+
+			string[] cancelResponses = await Task.WhenAll(orderedTargets.Select(target => Cancel(target, cancelIDs))).ConfigureAwait(false);
+
+			return string.Join(Environment.NewLine, (IEnumerable<string>) cancelResponses);
 		}
 
 		if (subCommand.Equals(SubCommandStop, StringComparison.OrdinalIgnoreCase)) {
@@ -173,7 +209,33 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 				return null;
 			}
 
-			return string.Join(Environment.NewLine, orderedTargets.Select(Stop));
+			HashSet<uint>? stopIDs = null;
+
+			if ((index + 1) < args.Length) {
+				if ((index + 2) < args.Length) {
+					return FormatUsage(orderedTargets);
+				}
+
+				string[] tokens = args[index + 1].Split(SharedInfo.ListElementSeparators, StringSplitOptions.RemoveEmptyEntries);
+
+				if (tokens.Length == 0) {
+					return FormatAll(orderedTargets, $"{Command}: no AppIDs given to stop.");
+				}
+
+				stopIDs = [];
+
+				foreach (string token in tokens) {
+					if (!TryParseAppId(token, out uint appID)) {
+						return FormatAll(orderedTargets, $"{Command}: invalid AppID `{token}`.");
+					}
+
+					stopIDs.Add(appID);
+				}
+			}
+
+			string[] stopResponses = await Task.WhenAll(orderedTargets.Select(target => Stop(target, stopIDs))).ConfigureAwait(false);
+
+			return string.Join(Environment.NewLine, (IEnumerable<string>) stopResponses);
 		}
 
 		if (access < EAccess.Master) {
@@ -192,7 +254,7 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 			if (!TryParseAppId(token, out uint appID)) {
 				return FormatAll(orderedTargets, $"{Command}: invalid AppID `{token}`.");
 			}
-			// HashSet.Add silently ignores duplicates, which is exactly what we want here.
+
 			gameIDs.Add(appID);
 		}
 
@@ -200,220 +262,66 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 			return FormatAll(orderedTargets, $"{Command}: too many AppIDs, the limit is {MaxGamesPlayedConcurrently}.");
 		}
 
-		// The duration is optional, which leaves "<AppIDs> [GameName]" ambiguous, so it is resolved by type: a
-		// token that parses as a number is the duration, anything else already starts the game name. A game whose
-		// name begins with a number therefore needs an explicit duration, e.g. "f 730 35 2 Fast 2 Furious".
 		float minutes = DefaultMinutes;
-		int nameStart = index + 1;
 
 		if ((index + 1) < args.Length) {
-			// float.TryParse(string, NumberStyles, IFormatProvider) is the exact overload ASF itself calls, so it
-			// survives trimming. See the remark on this class for why the obvious alternatives do not.
-			if (float.TryParse(args[index + 1], NumberStyles.Number, CultureInfo.InvariantCulture, out float parsedMinutes)) {
-				if ((parsedMinutes <= 0f) || (parsedMinutes > MaxMinutes)) {
-					return FormatAll(orderedTargets, $"{Command}: invalid minutes `{args[index + 1]}`, expected a number greater than 0 and at most {MaxMinutes:0}.");
-				}
-
-				minutes = parsedMinutes;
-				nameStart = index + 2;
-			}
-		}
-
-		// ASF's trimming removes System.Range.StartAt and string.Join(string, params string[]), so neither
-		// array slicing with an explicit start nor the params overload may appear here.
-		string? gameName = null;
-
-		if (nameStart < args.Length) {
-			List<string> nameParts = new List<string>();
-
-			for (int offset = nameStart; offset < args.Length; offset++) {
-				nameParts.Add(args[offset]);
+			if (!float.TryParse(args[index + 1], NumberStyles.Number, CultureInfo.InvariantCulture, out float parsedMinutes)) {
+				return FormatAll(orderedTargets, $"{Command}: invalid minutes `{args[index + 1]}`, expected a positive number. Note: custom game names are not supported. Usage: {Usage}");
 			}
 
-			gameName = string.Join(" ", nameParts);
+			if ((parsedMinutes <= 0f) || (parsedMinutes > MaxMinutes)) {
+				return FormatAll(orderedTargets, $"{Command}: invalid minutes `{args[index + 1]}`, expected a number greater than 0 and at most {MaxMinutes:0}.");
+			}
+
+			minutes = parsedMinutes;
 		}
 
-		string[] responses = await Task.WhenAll(orderedTargets.Select(target => Start(target, gameIDs, gameName, minutes))).ConfigureAwait(false);
+		if ((index + 2) < args.Length) {
+			return FormatAll(orderedTargets, $"{Command}: unexpected extra argument `{args[index + 2]}`. Custom game names are not supported. Usage: {Usage}");
+		}
 
-		// string.Join(string, params string[]) is trimmed away; the IEnumerable<string> overload is not.
-		return string.Join(Environment.NewLine, (IEnumerable<string>) responses);
+		string[] startResponses = await Task.WhenAll(orderedTargets.Select(target => Start(target, gameIDs, minutes))).ConfigureAwait(false);
+
+		return string.Join(Environment.NewLine, (IEnumerable<string>) startResponses);
 	}
 
 	private static bool IsCommand(string value) => value.Equals(Command, StringComparison.OrdinalIgnoreCase) || value.Equals(CommandShort, StringComparison.OrdinalIgnoreCase);
 
 	private static bool IsSubCommand(string value) => value.Equals(SubCommandStatus, StringComparison.OrdinalIgnoreCase) || value.Equals(SubCommandCancel, StringComparison.OrdinalIgnoreCase) || value.Equals(SubCommandStop, StringComparison.OrdinalIgnoreCase);
 
-	private async Task<string> Start(Bot bot, HashSet<uint> gameIDs, string? gameName, float minutes) {
-		string description = DescribeGames(gameIDs, gameName);
+	private async Task<string> Start(Bot bot, HashSet<uint> gameIDs, float minutes) {
+		BotSession session = Sessions.GetOrAdd(bot.BotName, _ => new BotSession(this, bot));
 
-		if (!bot.IsConnectedAndLoggedOn) {
-			return Format(bot, $"{Command}: bot is not connected / logged on.");
-		}
-
-		// Make sure a previous timer can never fire on top of this one.
-		Abort(bot);
-
-		// Actions.Play() pauses the cards farmer permanently as a side effect, so remember what the user had
-		// before we touch anything. The session has to hand the bot back exactly as it found it.
-		bool wasCardsPaused = bot.CardsFarmer.Paused;
-
-		try {
-			(bool success, string message) = await bot.Actions.Play(gameIDs, gameName).ConfigureAwait(false);
-
-			if (!success) {
-				return Format(bot, $"{Command}: failed to start {description} - {message}");
-			}
-		}
-		catch (Exception e) {
-			bot.ArchiLogger.LogGenericException(e);
-
-			return Format(bot, $"{Command}: failed to start {description} - {e.Message}");
-		}
-
-		TimeSpan duration = TimeSpan.FromMinutes(minutes);
-		Session session = new(this, bot, [.. gameIDs], gameName, duration, wasCardsPaused);
-
-		Sessions[bot.BotName] = session;
-
-		// Arm the timers only after the session is published, otherwise the callbacks could race the dictionary.
-		session.Start();
-
-		bot.ArchiLogger.LogGenericInfo($"{Command}: {description} started on {bot.BotName}, stopping in {FormatDuration(duration)} (heartbeat every {FormatDuration(HeartbeatInterval)}).");
-
-		return Format(bot, $"started {description} - will be stopped in {FormatDuration(duration)} (check: `{CommandShort} {SubCommandStatus}`, stop now: `{CommandShort} {SubCommandStop}`, detach timer only: `{CommandShort} {SubCommandCancel}`)");
+		return await session.AddOrUpdateGamesAsync(gameIDs, TimeSpan.FromMinutes(minutes)).ConfigureAwait(false);
 	}
 
 	private string GetStatus(Bot bot) {
-		if (!TryGetActiveSession(bot, out Session? session)) {
-			return Format(bot, $"{Command}: no active timer.");
+		if (!Sessions.TryGetValue(bot.BotName, out BotSession? session) || !session.HasActiveTasks) {
+			return Format(bot, $"{Command}: no active timers.");
 		}
 
-		return Format(bot, $"{Command}: {session.Describe()} -> stopping in {FormatDuration(session.Remaining)} ({session.DueAt:yyyy-MM-dd HH:mm:ss} UTC), heartbeat in {FormatDuration(session.HeartbeatDueIn)}");
+		return session.GetStatus();
 	}
 
-	private string Cancel(Bot bot) {
-		if (!Sessions.TryRemove(bot.BotName, out Session? session)) {
-			return Format(bot, $"{Command}: no active timer to cancel.");
+	private async Task<string> Cancel(Bot bot, HashSet<uint>? appIDs) {
+		if (!Sessions.TryGetValue(bot.BotName, out BotSession? session) || !session.HasActiveTasks) {
+			return Format(bot, $"{Command}: no active timers to cancel.");
 		}
 
-		session.Cancel();
-
-		return Format(bot, $"{Command}: timer for {session.Describe()} cancelled, the game keeps running.");
+		return await session.CancelAsync(appIDs).ConfigureAwait(false);
 	}
 
-	private string Stop(Bot bot) {
-		if (!Sessions.TryRemove(bot.BotName, out Session? session)) {
-			return Format(bot, $"{Command}: no active timer to stop.");
+	private async Task<string> Stop(Bot bot, HashSet<uint>? appIDs) {
+		if (!Sessions.TryGetValue(bot.BotName, out BotSession? session) || !session.HasActiveTasks) {
+			return Format(bot, $"{Command}: no active games to stop.");
 		}
 
-		session.MarkStopped();
-		session.Cancel();
-		_ = StopAsync(bot, session);
-
-		return Format(bot, $"{Command}: stopping {session.Describe()} now, cards farming state will be restored.");
+		return await session.StopAsync(appIDs).ConfigureAwait(false);
 	}
 
-	private void Abort(Bot bot) {
-		if (Sessions.TryRemove(bot.BotName, out Session? session)) {
-			session.Cancel();
-		}
-	}
-
-	private void OnSessionDue(Bot bot, Session session) {
-		if (!session.IsActive) {
-			// Superseded by a newer session, so there is nothing left to stop.
-			return;
-		}
-
-		if (Sessions.TryGetValue(bot.BotName, out Session? current) && (current == session)) {
-			Sessions.TryRemove(bot.BotName, out _);
-		} else {
-			session.Cancel();
-
-			return;
-		}
-
-		session.MarkStopped();
-		session.Cancel();
-
-		_ = StopAsync(bot, session);
-	}
-
-	private void OnHeartbeat(Bot bot, Session session) {
-		if (!session.IsActive) {
-			return;
-		}
-
-		if (bot.IsConnectedAndLoggedOn) {
-			bot.ArchiLogger.LogGenericInfo($"{Command}: heartbeat - {session.Describe()} is being played on {bot.BotName}, stopping in {FormatDuration(session.Remaining)}.");
-
-			_ = Reassert(bot, session);
-		} else {
-			bot.ArchiLogger.LogGenericWarning($"{Command}: heartbeat - {session.Describe()} is not being played on {bot.BotName} because the bot is offline, stopping in {FormatDuration(session.Remaining)}.");
-		}
-	}
-
-	private bool TryGetActiveSession(Bot bot, [NotNullWhen(true)] out Session? session) {
-		if (Sessions.TryGetValue(bot.BotName, out session) && session.IsActive) {
-			return true;
-		}
-
-		session = null;
-
-		return false;
-	}
-
-	private async Task Reassert(Bot bot, Session session) {
-		if (!session.IsActive) {
-			return;
-		}
-
-		try {
-			// Re-asserting the games necessarily re-pauses the cards farmer, which is the point: a `playfor` session
-			// owns the bot until its deadline, so a stray `resume` does not survive the next heartbeat. `cancel` is
-			// the documented way to hand the bot back early.
-			(bool success, string message) = await bot.Actions.Play(session.GameIDs, session.GameName).ConfigureAwait(false);
-
-			if (!success) {
-				bot.ArchiLogger.LogGenericWarning($"{Command}: heartbeat failed to re-assert {session.Describe()} on {bot.BotName} - {message}");
-			}
-		}
-		catch (Exception e) {
-			bot.ArchiLogger.LogGenericException(e);
-		}
-
-		// If this session was stopped while the Play call was in flight, and no new session took over,
-		// ensure games are cleared so the bot does not keep playing indefinitely.
-		if (!session.IsActive && session.WasStopped && !TryGetActiveSession(bot, out _)) {
-			_ = bot.Actions.Play([]);
-		}
-	}
-
-	private static async Task StopAsync(Bot bot, Session session) {
-		try {
-			// Actions.Pause() never touches the game list: it short-circuits whenever the farmer is already
-			// paused - which it always is here, because Actions.Play() pauses it when the session starts - and the
-			// only branch that would clear the games is the non-permanent one. An empty Play() is what actually
-			// stops the games; it reaches ArchiHandler.PlayGames([]), which is the same call ASF makes when it
-			// clears a session by itself.
-			(bool stopSuccess, string stopMessage) = await bot.Actions.Play([]).ConfigureAwait(false);
-
-			if (!stopSuccess) {
-				bot.ArchiLogger.LogGenericWarning($"{Command}: {session.Describe()} finished on {bot.BotName} but stopping the games failed - {stopMessage}");
-
-				return;
-			}
-
-			// Hand the cards farmer back exactly as we found it. Actions.Play() set a permanent pause, which would
-			// otherwise outlive the session and leave the bot without idling forever - ASF's own automatic resume
-			// refuses to lift a permanent pause. Only resume when it was actually running beforehand, so a bot the
-			// user paused on purpose stays paused.
-			string cardsState = session.WasCardsPaused ? "left paused as it was" : bot.Actions.Resume().Message;
-
-			bot.ArchiLogger.LogGenericInfo($"{Command}: {session.Describe()} finished on {bot.BotName}, games stopped, cards farming {cardsState}");
-		}
-		catch (Exception e) {
-			bot.ArchiLogger.LogGenericException(e);
+	private void OnGameDue(Bot bot, uint appID) {
+		if (Sessions.TryGetValue(bot.BotName, out BotSession? session)) {
+			_ = session.HandleGameDueAsync(appID);
 		}
 	}
 
@@ -457,10 +365,10 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 		return true;
 	}
 
-	private static string DescribeGames(IEnumerable<uint> gameIDs, string? gameName) {
-		string ids = string.Join("+", gameIDs.Select(static gameID => gameID.ToString(CultureInfo.InvariantCulture)));
+	private static string DescribeGames(IEnumerable<uint> gameIDs) {
+		List<string> list = gameIDs.Select(static gameID => gameID.ToString(CultureInfo.InvariantCulture)).ToList();
 
-		return string.IsNullOrEmpty(gameName) ? ids : $"{ids} ({gameName})";
+		return (list.Count > 0) ? string.Join("+", (IEnumerable<string>) list) : "<none>";
 	}
 
 	private static string FormatDuration(TimeSpan duration) {
@@ -471,46 +379,14 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 
 	private static string Format(Bot bot, string message) => $"Bot {bot.BotName} | {message}";
 
-	private static string FormatAll(IEnumerable<Bot> targets, string message) => string.Join(Environment.NewLine, targets.Select(target => Format(target, message)));
+	private static string FormatAll(IEnumerable<Bot> targets, string message) => string.Join(Environment.NewLine, (IEnumerable<string>) targets.Select(target => Format(target, message)));
 
 	private static string FormatUsage(IEnumerable<Bot> targets) => FormatAll(targets, $"usage: {Usage}");
 
-	private sealed class Session {
-		private readonly TimedPlayPlugin _plugin;
-		private readonly Bot _bot;
-		private readonly string? _gameName;
-		private readonly TimeSpan _duration;
-		private readonly bool _wasCardsPaused;
-
-		private Timer? _stopTimer;
-		private Timer? _heartbeatTimer;
-		private DateTime _nextHeartbeat;
-
-		internal Session(TimedPlayPlugin plugin, Bot bot, uint[] gameIDs, string? gameName, TimeSpan duration, bool wasCardsPaused) {
-			_plugin = plugin;
-			_bot = bot;
-			GameIDs = gameIDs;
-			_gameName = gameName;
-			_duration = duration;
-			_wasCardsPaused = wasCardsPaused;
-
-			DueAt = DateTime.UtcNow + duration;
-		}
-
-		/// <summary>Whether the cards farmer was already paused before this session started.</summary>
-		internal bool WasCardsPaused => _wasCardsPaused;
-
-		internal bool WasStopped { get; private set; }
-
-		internal void MarkStopped() => WasStopped = true;
-
-		internal uint[] GameIDs { get; }
-
-		internal string? GameName => _gameName;
-
+	private sealed class GameTask : IDisposable {
+		internal uint AppID { get; }
 		internal DateTime DueAt { get; }
-
-		internal bool IsActive => _stopTimer != null;
+		private Timer? _timer;
 
 		internal TimeSpan Remaining {
 			get {
@@ -520,44 +396,391 @@ internal sealed class TimedPlayPlugin : IPlugin, IBot, IBotCommand2, IBotConnect
 			}
 		}
 
-		internal TimeSpan HeartbeatDueIn {
-			get {
-				TimeSpan remaining = _nextHeartbeat - DateTime.UtcNow;
+		internal GameTask(uint appID, DateTime dueAt, TimerCallback callback, TimeSpan duration) {
+			AppID = appID;
+			DueAt = dueAt;
+			_timer = new Timer(callback, null, duration, Timeout.InfiniteTimeSpan);
+		}
 
-				return (remaining < TimeSpan.Zero) ? TimeSpan.Zero : remaining;
+		public void Dispose() {
+			Timer? timer = _timer;
+			_timer = null;
+			timer?.Dispose();
+		}
+	}
+
+	private sealed class BotSession : IDisposable {
+		private readonly TimedPlayPlugin _plugin;
+		private readonly Bot _bot;
+		private readonly SemaphoreSlim _lock = new(1, 1);
+		private readonly ConcurrentDictionary<uint, GameTask> _tasks = new();
+		private Timer? _heartbeatTimer;
+		private DateTime _nextHeartbeat;
+		private bool _initialCardsPaused;
+
+		internal BotSession(TimedPlayPlugin plugin, Bot bot) {
+			_plugin = plugin;
+			_bot = bot;
+		}
+
+		internal bool HasActiveTasks => !_tasks.IsEmpty;
+
+		internal async Task<string> AddOrUpdateGamesAsync(HashSet<uint> gameIDs, TimeSpan duration) {
+			await _lock.WaitAsync().ConfigureAwait(false);
+
+			try {
+				if (!_bot.IsConnectedAndLoggedOn) {
+					return Format(_bot, $"{Command}: bot is not connected / logged on.");
+				}
+
+				HashSet<uint> plannedKeys = new(_tasks.Keys);
+
+				foreach (uint id in gameIDs) {
+					plannedKeys.Add(id);
+				}
+
+				if (plannedKeys.Count > MaxGamesPlayedConcurrently) {
+					return Format(_bot, $"{Command}: adding {gameIDs.Count} game(s) would result in {plannedKeys.Count} concurrent games, exceeding the limit of {MaxGamesPlayedConcurrently}.");
+				}
+
+				if (_tasks.IsEmpty) {
+					_initialCardsPaused = _bot.CardsFarmer.Paused;
+				}
+
+				uint[] playArray = [.. plannedKeys];
+				(bool success, string message) = await _bot.Actions.Play(playArray).ConfigureAwait(false);
+
+				if (!success) {
+					if (_tasks.IsEmpty) {
+						return Format(_bot, $"{Command}: failed to play {DescribeGames(gameIDs)} - {message}");
+					}
+
+					_ = await _bot.Actions.Play([.. _tasks.Keys]).ConfigureAwait(false);
+
+					return Format(_bot, $"{Command}: failed to play {DescribeGames(gameIDs)} - {message}");
+				}
+
+				DateTime dueAt = DateTime.UtcNow + duration;
+
+				foreach (uint id in gameIDs) {
+					if (_tasks.TryRemove(id, out GameTask? existing)) {
+						existing.Dispose();
+					}
+
+					uint currentId = id;
+					GameTask newTask = new(currentId, dueAt, _ => _plugin.OnGameDue(_bot, currentId), duration);
+					_tasks[currentId] = newTask;
+				}
+
+				EnsureHeartbeatRunning();
+
+				_bot.ArchiLogger.LogGenericInfo($"{Command}: {DescribeGames(gameIDs)} started/updated on {_bot.BotName}, running for {FormatDuration(duration)} (total active: {_tasks.Count}).");
+
+				return Format(_bot, $"started/updated {DescribeGames(gameIDs)} - will run for {FormatDuration(duration)} (active: {_tasks.Count}/{MaxGamesPlayedConcurrently})");
+			}
+			catch (Exception e) {
+				_bot.ArchiLogger.LogGenericException(e);
+
+				return Format(_bot, $"{Command}: failed to start {DescribeGames(gameIDs)} - {e.Message}");
+			}
+			finally {
+				_lock.Release();
 			}
 		}
 
-		internal string Describe() => DescribeGames(GameIDs, _gameName);
+		internal async Task HandleGameDueAsync(uint appID) {
+			await _lock.WaitAsync().ConfigureAwait(false);
 
-		internal void Start() {
-			_nextHeartbeat = DateTime.UtcNow + HeartbeatInterval;
+			try {
+				if (!_tasks.TryRemove(appID, out GameTask? task)) {
+					return;
+				}
 
-			_stopTimer = new Timer(_ => _plugin.OnSessionDue(_bot, this), null, _duration, Timeout.InfiniteTimeSpan);
+				task.Dispose();
 
-			_heartbeatTimer = new Timer(
-				_ => {
-					_nextHeartbeat = DateTime.UtcNow + HeartbeatInterval;
+				_bot.ArchiLogger.LogGenericInfo($"{Command}: game {appID} timer expired on {_bot.BotName}.");
 
-					_plugin.OnHeartbeat(_bot, this);
-				},
-				null,
-				HeartbeatInterval,
-				HeartbeatInterval
-			);
+				if (!_tasks.IsEmpty) {
+					uint[] remainingIds = [.. _tasks.Keys];
+					(bool success, string message) = await _bot.Actions.Play(remainingIds).ConfigureAwait(false);
+
+					if (!success) {
+						_bot.ArchiLogger.LogGenericWarning($"{Command}: failed to reconcile games on {_bot.BotName} after {appID} ended - {message}");
+					}
+				} else {
+					StopHeartbeat();
+					await StopAllGamesAndRestoreFarmingAsync().ConfigureAwait(false);
+				}
+			}
+			catch (Exception e) {
+				_bot.ArchiLogger.LogGenericException(e);
+			}
+			finally {
+				_lock.Release();
+			}
 		}
 
-		internal void Cancel() {
-			// Timer.Dispose() is idempotent, so a plain swap is enough here and avoids Interlocked, which ASF
-			// never calls and which therefore does not survive its trimming.
-			Timer? stopTimer = _stopTimer;
+		internal async Task HeartbeatAsync() {
+			await _lock.WaitAsync().ConfigureAwait(false);
+
+			try {
+				if (_tasks.IsEmpty) {
+					StopHeartbeat();
+
+					return;
+				}
+
+				_nextHeartbeat = DateTime.UtcNow + HeartbeatInterval;
+
+				if (_bot.IsConnectedAndLoggedOn) {
+					uint[] activeIds = [.. _tasks.Keys];
+					_bot.ArchiLogger.LogGenericInfo($"{Command}: heartbeat - {_tasks.Count} game(s) active on {_bot.BotName} ({DescribeGames(activeIds)}).");
+
+					(bool success, string message) = await _bot.Actions.Play(activeIds).ConfigureAwait(false);
+
+					if (!success) {
+						_bot.ArchiLogger.LogGenericWarning($"{Command}: heartbeat failed to re-assert games on {_bot.BotName} - {message}");
+					}
+				} else {
+					_bot.ArchiLogger.LogGenericWarning($"{Command}: heartbeat - {_tasks.Count} game(s) active on {_bot.BotName} but bot is offline.");
+				}
+			}
+			catch (Exception e) {
+				_bot.ArchiLogger.LogGenericException(e);
+			}
+			finally {
+				_lock.Release();
+			}
+		}
+
+		internal async Task ReassertAsync() {
+			await _lock.WaitAsync().ConfigureAwait(false);
+
+			try {
+				if (_tasks.IsEmpty) {
+					return;
+				}
+
+				if (_bot.IsConnectedAndLoggedOn) {
+					uint[] activeIds = [.. _tasks.Keys];
+					_bot.ArchiLogger.LogGenericInfo($"{Command}: bot {_bot.BotName} logged on, re-asserting {_tasks.Count} game(s) ({DescribeGames(activeIds)}).");
+
+					(bool success, string message) = await _bot.Actions.Play(activeIds).ConfigureAwait(false);
+
+					if (!success) {
+						_bot.ArchiLogger.LogGenericWarning($"{Command}: failed to re-assert games on {_bot.BotName} upon login - {message}");
+					}
+				}
+			}
+			catch (Exception e) {
+				_bot.ArchiLogger.LogGenericException(e);
+			}
+			finally {
+				_lock.Release();
+			}
+		}
+
+		internal async Task<string> CancelAsync(HashSet<uint>? appIDs) {
+			await _lock.WaitAsync().ConfigureAwait(false);
+
+			try {
+				if (_tasks.IsEmpty) {
+					return Format(_bot, $"{Command}: no active timers to cancel.");
+				}
+
+				if ((appIDs == null) || (appIDs.Count == 0)) {
+					List<uint> cancelledAll = [.. _tasks.Keys];
+
+					foreach (uint id in cancelledAll) {
+						if (_tasks.TryRemove(id, out GameTask? task)) {
+							task.Dispose();
+						}
+					}
+
+					StopHeartbeat();
+
+					return Format(_bot, $"{Command}: timers for {DescribeGames(cancelledAll)} cancelled, games keep running on Steam.");
+				}
+
+				List<uint> cancelled = [];
+				List<uint> notFound = [];
+
+				foreach (uint id in appIDs) {
+					if (_tasks.TryRemove(id, out GameTask? task)) {
+						task.Dispose();
+						cancelled.Add(id);
+					} else {
+						notFound.Add(id);
+					}
+				}
+
+				if (_tasks.IsEmpty) {
+					StopHeartbeat();
+				}
+
+				List<string> parts = [];
+
+				if (cancelled.Count > 0) {
+					parts.Add($"timers for {DescribeGames(cancelled)} cancelled, games keep running on Steam");
+				}
+
+				if (notFound.Count > 0) {
+					parts.Add($"game(s) {DescribeGames(notFound)} not found in active timers");
+				}
+
+				return Format(_bot, $"{Command}: {string.Join("; ", (IEnumerable<string>) parts)}.");
+			}
+			finally {
+				_lock.Release();
+			}
+		}
+
+		internal async Task<string> StopAsync(HashSet<uint>? appIDs) {
+			await _lock.WaitAsync().ConfigureAwait(false);
+
+			try {
+				if (_tasks.IsEmpty) {
+					return Format(_bot, $"{Command}: no active games to stop.");
+				}
+
+				if ((appIDs == null) || (appIDs.Count == 0)) {
+					List<uint> stoppedAll = [.. _tasks.Keys];
+
+					foreach (uint id in stoppedAll) {
+						if (_tasks.TryRemove(id, out GameTask? task)) {
+							task.Dispose();
+						}
+					}
+
+					StopHeartbeat();
+					await StopAllGamesAndRestoreFarmingAsync().ConfigureAwait(false);
+
+					return Format(_bot, $"{Command}: stopped all games ({DescribeGames(stoppedAll)}), cards farming state restored.");
+				}
+
+				List<uint> stopped = [];
+				List<uint> notFound = [];
+
+				foreach (uint id in appIDs) {
+					if (_tasks.TryRemove(id, out GameTask? task)) {
+						task.Dispose();
+						stopped.Add(id);
+					} else {
+						notFound.Add(id);
+					}
+				}
+
+				if (stopped.Count > 0) {
+					if (_tasks.IsEmpty) {
+						StopHeartbeat();
+						await StopAllGamesAndRestoreFarmingAsync().ConfigureAwait(false);
+					} else {
+						uint[] remainingIds = [.. _tasks.Keys];
+						(bool success, string message) = await _bot.Actions.Play(remainingIds).ConfigureAwait(false);
+
+						if (!success) {
+							_bot.ArchiLogger.LogGenericWarning($"{Command}: failed to reconcile games on {_bot.BotName} after stopping {DescribeGames(stopped)} - {message}");
+						}
+					}
+				}
+
+				List<string> parts = [];
+
+				if (stopped.Count > 0) {
+					if (_tasks.IsEmpty) {
+						parts.Add($"stopped {DescribeGames(stopped)}, all games stopped, cards farming state restored");
+					} else {
+						parts.Add($"stopped {DescribeGames(stopped)}, remaining active games: {DescribeGames(_tasks.Keys)}");
+					}
+				}
+
+				if (notFound.Count > 0) {
+					parts.Add($"game(s) {DescribeGames(notFound)} not found in active games");
+				}
+
+				return Format(_bot, $"{Command}: {string.Join("; ", (IEnumerable<string>) parts)}.");
+			}
+			finally {
+				_lock.Release();
+			}
+		}
+
+		internal string GetStatus() {
+			List<GameTask> tasks = _tasks.Values.OrderBy(static t => t.DueAt).ToList();
+
+			if (tasks.Count == 0) {
+				return Format(_bot, $"{Command}: no active timers.");
+			}
+
+			TimeSpan heartbeatIn = _nextHeartbeat - DateTime.UtcNow;
+
+			if (heartbeatIn < TimeSpan.Zero) {
+				heartbeatIn = TimeSpan.Zero;
+			}
+
+			if (tasks.Count == 1) {
+				GameTask t = tasks[0];
+
+				return Format(_bot, $"{Command}: {t.AppID} -> stopping in {FormatDuration(t.Remaining)} ({t.DueAt:yyyy-MM-dd HH:mm:ss} UTC), heartbeat in {FormatDuration(heartbeatIn)}");
+			}
+
+			List<string> lines = [
+				Format(_bot, $"{Command}: {tasks.Count} active game(s), heartbeat in {FormatDuration(heartbeatIn)}:")
+			];
+
+			foreach (GameTask t in tasks) {
+				lines.Add($"  - AppID {t.AppID} -> stopping in {FormatDuration(t.Remaining)} ({t.DueAt:yyyy-MM-dd HH:mm:ss} UTC)");
+			}
+
+			return string.Join(Environment.NewLine, (IEnumerable<string>) lines);
+		}
+
+		private void EnsureHeartbeatRunning() {
+			_nextHeartbeat = DateTime.UtcNow + HeartbeatInterval;
+
+			if (_heartbeatTimer == null) {
+				_heartbeatTimer = new Timer(
+					_ => _ = HeartbeatAsync(),
+					null,
+					HeartbeatInterval,
+					HeartbeatInterval
+				);
+			}
+		}
+
+		private void StopHeartbeat() {
 			Timer? heartbeatTimer = _heartbeatTimer;
-
-			_stopTimer = null;
 			_heartbeatTimer = null;
-
-			stopTimer?.Dispose();
 			heartbeatTimer?.Dispose();
+		}
+
+		private async Task StopAllGamesAndRestoreFarmingAsync() {
+			try {
+				(bool stopSuccess, string stopMessage) = await _bot.Actions.Play([]).ConfigureAwait(false);
+
+				if (!stopSuccess) {
+					_bot.ArchiLogger.LogGenericWarning($"{Command}: all games finished on {_bot.BotName} but stopping them failed - {stopMessage}");
+				}
+
+				string cardsState = _initialCardsPaused ? "left paused as it was" : _bot.Actions.Resume().Message;
+
+				_bot.ArchiLogger.LogGenericInfo($"{Command}: all games finished on {_bot.BotName}, games stopped, cards farming {cardsState}.");
+			}
+			catch (Exception e) {
+				_bot.ArchiLogger.LogGenericException(e);
+			}
+		}
+
+		public void Dispose() {
+			StopHeartbeat();
+
+			foreach (uint id in _tasks.Keys) {
+				if (_tasks.TryRemove(id, out GameTask? task)) {
+					task.Dispose();
+				}
+			}
+
+			_lock.Dispose();
 		}
 	}
 }
