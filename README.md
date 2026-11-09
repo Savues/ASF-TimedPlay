@@ -271,21 +271,14 @@ cd ASF-TimedPlay
 .\build.ps1 -Configuration Debug             # Debug 构建
 ```
 
-发布 Release 用 `release.ps1`,它全程走 GitHub REST API,**不需要 `git push`**(Git 的 smart-HTTP 传输在某些网络下会被拦或超时):
+打 tag 即可触发 CI 自动构建并发布 Release:
 
-```powershell
-.\release.ps1 -Version 1.6.1
+```bash
+git tag v1.6.1
+git push origin v1.6.1
 ```
 
-脚本依次做这几件事:把 `-Version` 写进 `TimedPlay.csproj` → 构建 → 打包 `TimedPlay.zip`(内含 `plugins/TimedPlay/TimedPlay.dll`、`LICENSE`、`README.md`)→ 通过 API 把当前工作树镜像成远端默认分支上的一个提交 → 打 tag → 建 Release 并上传附件。远端分支始终等于当前工作树,不依赖本地提交历史。
-
-Token 的取值顺序是 `-Token` 参数 → `$env:GITHUB_TOKEN` → git 为 github.com 保存的凭据。
-
-```powershell
-.\release.ps1 -Version 1.6.1 -SkipBuild   # 复用 bin 里已有的 DLL,不重新构建
-```
-
-CI(`.github/workflows/ci.yml`)只在 `main` 与 PR 上跑构建和裁剪检查,不再负责发布。
+CI 会用 tag 的版本号自动设置程序集版本，执行完整裁剪检查，自动打包 `TimedPlay.zip` 并发布到 GitHub Releases。
 
 ---
 
